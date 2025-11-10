@@ -55,7 +55,8 @@ end
 function AddEscaping(str, unsupportedChars)
     Debug.assert(#unsupportedChars <= #REPLACE_CHARS, "too many unsupported chars to replace. You can extend REPLACE_CHARS to avoid the issue")
     -- note that move function copies elements, it doens't remove them from the original function
-    local replaceChars = table.move(REPLACE_CHARS, 1, #unsupportedChars, 1)
+    local replaceChars = {}
+    table.move(REPLACE_CHARS, 1, #unsupportedChars, 1, replaceChars)
     local newStr = ""
     for i=1, #str do
         local char = str:byte(i)
@@ -87,7 +88,8 @@ end
 ---@return string? -- the escaped string or nil on input error
 function RemoveEscaping(str, unsupportedChars)
     Debug.assert(#unsupportedChars <= #REPLACE_CHARS, "too many unsupported chars to replace. You can extend REPLACE_CHARS to avoid the issue")
-    local replaceChars = table.move(REPLACE_CHARS, 1, #unsupportedChars, 1)
+    local replaceChars = {}
+    table.move(REPLACE_CHARS, 1, #unsupportedChars, 1, replaceChars)
     local reversedReplaceableChars = getReversedTable(replaceChars)
     local newStr = ""
     local i = 1
