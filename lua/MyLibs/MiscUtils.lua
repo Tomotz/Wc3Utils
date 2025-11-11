@@ -1,7 +1,24 @@
 if Debug then Debug.beginFile("MiscUtils") end
 do
---- Small misc utilities that are used in my other libraries, or just weren't enough to warrent their own library.
---- Some I wrote myself and some I borrowed from others
+
+--[[
+MiscUtils v1.0.0 by Tomotz
+  Small misc utilities that are used in my other libraries, or just weren't enough to warrent their own library.
+  Some I wrote myself and some I borrowed from others
+
+--- This hook is changing execute func to be a coroutine.
+--- It also allows calling it with a function instead of a name, and passing args
+--- to the function
+function Hook:ExecuteFunc(func, ...)
+
+--- Sets the GameStatus to one of GAME_STATUS_OFFLINE, GAME_STATUS_ONLINE, GAME_STATUS_REPLAY to let you know if you're running in replay/offline/online
+GameStatus global variable
+
+--- Get the time passed from game start
+GetElapsedGameTime()
+
+Updated: Nov 2025
+--]]
 
 ---@param func string | function
 ---@vararg any
@@ -54,6 +71,21 @@ local function SetGameStatus()
     end
 end
 OnInit.global(SetGameStatus)
+
+
+local gametime_initialized = false
+local gameStartTimer ---@type timer
+---@return real
+function GetElapsedGameTime()
+    if not gametime_initialized then return 0 end
+    return TimerGetElapsed(gameStartTimer)
+end
+
+OnInit.global(function()
+    gametime_initialized = true
+    gameStartTimer = CreateTimer()
+    TimerStart(gameStartTimer, 0xF4240, false, nil)
+end)
 
 end
 if Debug then Debug.endFile() end

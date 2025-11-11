@@ -73,20 +73,6 @@ local WriteBufferSize = 0
 local FileIdx = 0
 local IsFlushed = true
 
-local gametime_initialized = false
-local gameStartTimer ---@type timer
----@return real
-function GetElapsedGameTime()
-    if not gametime_initialized then return 0 end
-    return TimerGetElapsed(gameStartTimer)
-end
-
-OnInit.global(function()
-    gametime_initialized = true
-    gameStartTimer = CreateTimer()
-    TimerStart(gameStartTimer, 0xF4240, false, nil)
-end)
-
 ---@param text string
 local function WriteAndFlush(text)
     if (FileIdx <= MAX_FILES) or ((GameStatus == GAME_STATUS_REPLAY) and (FileIdx <= MAX_FILESREPLAY)) then
