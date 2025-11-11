@@ -119,6 +119,11 @@ function CreateUnitForPlayer()
         CreateUnit(GetTriggerPlayer(), FourCC('hfoo'), 0, 0, 0)
     end
 end
+
+function FlushLog()
+    LogWrite("")
+end
+
 -- Table mapping event chat command to their handler functions
 local chatHandlers = {}
 
@@ -131,6 +136,8 @@ OnInit.trig(function() chatHandlers =  {
         ["-e"] = TestEscaping,
         ["-se"] = TestSerializer,
         ["-sy"] = TestSyncStream,
+        ["-o"] = TestOrigSync,
+        ["-f"] = FlushLog,
     }
 end)
 
