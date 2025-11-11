@@ -68,9 +68,10 @@ local WRITE_MAP_NAME = true
 -- Local variables for internal use
 local LogFileName ---@type string
 
-local WriteBuffer = "\n"
+local WriteBuffer = {}
+local WriteBufferSize = 0
 local FileIdx = 0
-local IsFlashed = true
+local IsFlushed = true
 
 local gametime_initialized = false
 local gameStartTimer ---@type timer
@@ -91,6 +92,7 @@ local function WriteAndFlush(text)
     if (FileIdx <= MAX_FILES) or ((GameStatus == GAME_STATUS_REPLAY) and (FileIdx <= MAX_FILESREPLAY)) then
         if FileIO ~= nil then -- on rare occasions where log is called very early, FileIO may not be initialized yet
             FileIO.Save(LogFileName, text, false)
+            IsFlushed = true
         end
     end
 end
@@ -117,23 +119,22 @@ end
 -- Writes a line to the WriteBuffer to be logged
 function LogWriteNoFlush(...)
     local args = {...}
-    if #args > 1 then
-        for i = 1, #args - 1 do
-            args[i] = tostring(args[i]) .. " " -- Convert each argument to a string
-        end
+    for i = 1, #args do
+        args[i] = tostring(args[i]) -- Convert each argument to a string
     end
-    args[#args] = tostring(args[#args])
-    local full_line = tostring(math.floor(GetElapsedGameTime())) .. ":" .. table.concat(args)  .. "\n"
-    if StringLength(WriteBuffer) + StringLength(full_line) > MAX_BUFF_LEN then
-        if not IsFlashed then
-            WriteAndFlush(WriteBuffer)
+    local fullLine = tostring(math.floor(GetElapsedGameTime())) .. ":" .. table.concat(args, " ")  .. "\n"
+    local lineLen = #fullLine
+    if WriteBufferSize + lineLen > MAX_BUFF_LEN then
+        if not IsFlushed then
+            WriteAndFlush(table.concat(WriteBuffer))
         end
         CreateNewLogFile()
-        WriteBuffer = full_line
-    else
-        WriteBuffer = WriteBuffer .. full_line
+        WriteBuffer = {}
+        WriteBufferSize = 0
     end
-    IsFlashed = false
+    table.insert(WriteBuffer, fullLine)
+    WriteBufferSize = WriteBufferSize + lineLen
+    IsFlushed = false
 end
 
 -- Writes a line to the WriteBuffer to be logged only in replay mode
@@ -146,8 +147,7 @@ end
 -- Writes a line to the current log
 function LogWrite(...)
     LogWriteNoFlush(...)
-    WriteAndFlush(WriteBuffer)
-    IsFlashed = true
+    WriteAndFlush(table.concat(WriteBuffer))
 end
 
 -- Writes a line to the log only in replay mode

@@ -57,29 +57,29 @@ function AddEscaping(str, unsupportedChars)
     -- note that move function copies elements, it doens't remove them from the original function
     local replaceChars = {}
     table.move(REPLACE_CHARS, 1, #unsupportedChars, 1, replaceChars)
-    local newStr = ""
+    local newStr = {}
     for i=1, #str do
         local char = str:byte(i)
         if char == ESCAPE_CHAR then
-            newStr = newStr .. string.rep(string.char(ESCAPE_CHAR), 2)
+            table.insert(newStr, string.rep(string.char(ESCAPE_CHAR), 2))
             goto continue
         end
         for j, v in ipairs(unsupportedChars) do
             if char == v then
-                newStr = newStr .. string.char(replaceChars[j])
+                table.insert(newStr, string.char(replaceChars[j]))
                 goto continue
             end
         end
         for j, v in ipairs(replaceChars) do
             if char == v then
-                newStr = newStr .. string.char(ESCAPE_CHAR) .. string.char(v)
+                table.insert(newStr, string.char(ESCAPE_CHAR) .. string.char(v))
                 goto continue
             end
         end
-        newStr = newStr .. string.char(char)
+        table.insert(newStr, string.char(char))
         ::continue::
     end
-    return newStr
+    return table.concat(newStr)
 end
 
 --- Opens a string previosly escaped with AddEscaping
@@ -91,7 +91,7 @@ function RemoveEscaping(str, unsupportedChars)
     local replaceChars = {}
     table.move(REPLACE_CHARS, 1, #unsupportedChars, 1, replaceChars)
     local reversedReplaceableChars = getReversedTable(replaceChars)
-    local newStr = ""
+    local newStr = {}
     local i = 1
     while i <= #str do
         local char = str:byte(i)
@@ -107,14 +107,14 @@ function RemoveEscaping(str, unsupportedChars)
             -- either we have 2 escape chars, which we should merge to one,
             -- or we have an escaped char and then a replaceable char which should turn to the
             -- replaceable char
-            newStr = newStr .. string.char(char)
+            table.insert(newStr, string.char(char))
         elseif reversedReplaceableChars[char] then
-            newStr = newStr .. string.char(unsupportedChars[reversedReplaceableChars[char]])
+            table.insert(newStr, string.char(unsupportedChars[reversedReplaceableChars[char]]))
         else
-            newStr = newStr .. string.char(char)
+            table.insert(newStr, string.char(char))
         end
     end
-    return newStr
+    return table.concat(newStr)
 end
 
 end
