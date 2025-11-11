@@ -201,7 +201,7 @@ function singleSyncTest(testName, datas)
         totalFlits = totalFlits + math.ceil((#data + 1) / FLIT_DATA_SIZE)
 
         doneSyncs[i] = false
-        SyncStream.sync(Player(0), data, function (syncedData, whichPlayer)
+        SyncStream.sync(Player(0), data, function (syncedData)
             Debug.assert(type(syncedData) == "string", "got " .. type(syncedData) .. " sync data")
             Debug.assert(#syncedData == #data, "wrong len for syncData. Expected: " .. #data .. ", got: " .. #syncedData .. ". " .. string.sub(syncedData, 1, 50) .. "...")
             Debug.assert(syncedData == data, "wrong data for syncData. Expected: " .. string.sub(data, 1, 50)  .. ". got: " .. string.sub(syncedData, 1, 5000) .. "...")

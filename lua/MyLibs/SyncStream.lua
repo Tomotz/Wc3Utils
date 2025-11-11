@@ -10,7 +10,7 @@ API:
 --- Note that SyncStream.sync must be called from all clients, even the ones that don't have the data. getLocalData can be different between clients.
 ---@param whichPlayer player -- the player who's data is used as the sync data
 ---@param getLocalData string | fun():string -- the data to sync, or a callback that returns the data to sync
----@param callback fun(syncedData:string, whichPlayer:player) -- the callback to call once the sync is done.
+---@param callback fun(syncedData:string, ...) -- the callback to call once the sync is done.
 ---@param ... any -- additional arguments to pass to the callback. Note that the args must be the same for all clients.
 function SyncStream.sync(whichPlayer, getLocalData, callback, ...)
 
@@ -109,8 +109,7 @@ OnInit.global("SyncStream", function()
 
     local blockSyncedData = nil
     ---@param syncedData string
-    ---@param whichPlayer player
-    function SyncDone(syncedData, whichPlayer)
+    function SyncDone(syncedData)
         blockSyncedData = syncedData
     end
 
@@ -161,7 +160,7 @@ OnInit.global("SyncStream", function()
     --- Note that SyncStream.sync must be called from all clients, even the ones that don't have the data. getLocalData can be different between clients.
     ---@param whichPlayer player -- the player who's data is used as the sync data
     ---@param getLocalData string | fun():string -- the data to sync, or a callback that returns the data to sync
-    ---@param callback fun(syncedData:string, whichPlayer:player) -- the callback to call once the sync is done.
+    ---@param callback fun(syncedData:string, ...) -- the callback to call once the sync is done.
     ---@param ... any -- additional arguments to pass to the callback. Note that the args must be the same for all clients.
     function SyncStream.sync(whichPlayer, getLocalData, callback, ...)
         local pid = GetPlayerId(whichPlayer)

@@ -108,11 +108,11 @@ function LogWriteNoFlush(...)
     for i = 1, #args do
         args[i] = tostring(args[i]) -- Convert each argument to a string
     end
-    local fullLine = tostring(math.floor(GetElapsedGameTime())) .. ":" .. table.concat(args, " ")  .. "\n"
+    local fullLine = tostring(math.floor(GetElapsedGameTime())) .. ":" .. table.concat(args, " ")
     local lineLen = #fullLine
     if WriteBufferSize + lineLen > MAX_BUFF_LEN then
         if not IsFlushed then
-            WriteAndFlush(table.concat(WriteBuffer))
+            WriteAndFlush(table.concat(WriteBuffer, "\n"))
         end
         CreateNewLogFile()
         WriteBuffer = {}
@@ -133,7 +133,7 @@ end
 -- Writes a line to the current log
 function LogWrite(...)
     LogWriteNoFlush(...)
-    WriteAndFlush(table.concat(WriteBuffer))
+    WriteAndFlush(table.concat(WriteBuffer, "\n"))
 end
 
 -- Writes a line to the log only in replay mode
