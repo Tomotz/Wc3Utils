@@ -5023,7 +5023,7 @@ function IsLocationVisibleToPlayer(whichLocation, whichPlayer) end -- (native)
 ---@param x number
 ---@param y number
 ---@param whichPlayer player
----@return boolean
+---@return boolean -- returns true if the point is covered by fog of war (the player explored it before but can’t currently see it).
 function IsFoggedToPlayer(x, y, whichPlayer) end -- (native)
 
 ---@param whichLocation location
@@ -5034,7 +5034,7 @@ function IsLocationFoggedToPlayer(whichLocation, whichPlayer) end -- (native)
 ---@param x number
 ---@param y number
 ---@param whichPlayer player
----@return boolean
+---@return boolean -- returns true if the point is covered by black mask (the player has never seen it).
 function IsMaskedToPlayer(x, y, whichPlayer) end -- (native)
 
 ---@param whichLocation location
