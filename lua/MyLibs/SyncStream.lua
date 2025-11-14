@@ -1,7 +1,8 @@
 if Debug then Debug.beginFile("SyncStream") end
 do
 --[[
-By Trokkin https://www.hiveworkshop.com/threads/syncstream.349055/
+Optimized SyncStream v1.0.0 by Tomotz
+Original version By Trokkin https://www.hiveworkshop.com/threads/syncstream.349055/
 
 Provides functionality to designed to safely sync arbitrary amounts of data.
 Uses timers to spread BlzSendSyncData calls over time.

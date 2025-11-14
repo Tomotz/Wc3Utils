@@ -2,7 +2,7 @@ if Debug then Debug.beginFile("StringEscape") end
 do
 
 --[[
-    StringEscape by Tomotz
+    StringEscape v1.0.0 by Tomotz
 
     Allows escaping unsupported characters in strings.
     Since most characters we want to escape are pretty useful, (textual characters or null terminator which are very common in strings)
