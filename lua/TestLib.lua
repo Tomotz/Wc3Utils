@@ -344,6 +344,49 @@ function TestOrigSync()
     end)
 end
 
+function testFileIO()
+    print("testing FileIO savefile/loadfile")
+    LogWriteNoFlush("testing FileIO savefile/loadfile")
+
+    -- test load:
+
+    local testData = {
+        "Hello, World!",
+        "\0\10\13\91\92\93",
+        string.rep("A", 5000),
+        "\nLine1\nLine2\r\nLine3]",
+        "\247\248\249\250\251\252\253",
+        "--[[",
+        "[[",
+        "Mixed \0 data \10 with \13 special \91 characters \92 and \93 end.",
+
+    }
+    local allChars = {}
+    local allCharsSave = {}
+    for i = 0, 255 do
+        table.insert(allChars, string.rep(string.char(i), MAX_TEXT_LOAD))
+        table.insert(allCharsSave, string.rep(string.char(i),  MAX_TEXT_SAVE))
+    end
+    table.insert(testData, table.concat(allChars))
+
+    for i, data in ipairs(testData) do
+        local filenameLoad = "Savegames\\tests\\test_fileio_load_" .. i .. ".txt"
+
+        FileIO.Save(filenameLoad, data)
+        local loadedData = FileIO.Load(filenameLoad)
+        Debug.assert(loadedData ~= nil, "FileIO.Load returned nil for file: " .. filenameLoad)
+        Debug.assert(loadedData == data, "FileIO Load data mismatch for file: " .. filenameLoad .. ". Expected: " .. string.sub(data, 1, 50) .. "... Got: " .. string.sub(loadedData, 1, 50) .. "...")
+    end
+
+    local filenameSave = "Savegames\\tests\\test_fileio_save.txt"
+    FileIO.Save(filenameSave, table.concat(allCharsSave), false) -- save without load escaping
+    print("File IO save cannot be automatically validated. Please check that the file " .. filenameSave .. " was created and looks correct.")
+    LogWriteNoFlush("File IO save cannot be automatically validated. Please check that the file " .. filenameSave .. " was created and looks correct.")
+
+    print("FileIO savefile/loadfile end")
+    LogWriteNoFlush("FileIO savefile/loadfile end")
+end
+
 OnInit.final(function()
     -- Run tests
     -- test_AddEscaping()
@@ -352,6 +395,7 @@ OnInit.final(function()
     -- LogWrite("escaping validation done")
     -- test_dumpLoad()
     -- LogWrite("test_dumpLoad validation done")
+    testFileIO()
     -- ExecuteFunc(test_sync)
     -- ExecuteFunc(test_saveLoad)
 end)
