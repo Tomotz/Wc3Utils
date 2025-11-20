@@ -130,6 +130,9 @@ function RegisterEvents()
     RegisterFastTimer()
     RegisterSlowTimer()
     CoroutineStarted()
+    --- setting Mage as global so I can later access it from the console
+    Mage = CreateUnit(Player(0), FourCC("Hblm"), 0, 0, 0)
+    SetHeroLevel(Mage, 20, false)
 end
 
 OnInit(RegisterEvents)
