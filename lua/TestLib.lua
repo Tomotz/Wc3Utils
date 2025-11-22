@@ -178,17 +178,16 @@ local origTable = {
 --     origTable[#origTable + 1] = string.char(i)
 -- end
 
-function test_dumpLoad()
-    local packedStr = Serializer.dumpVariable(origTable)
+---@param tbl table? -- if not given, origTable is used
+function test_dumpLoad(tbl)
+    tbl = tbl or origTable
+    local packedStr = Serializer.dumpVariable(tbl)
     LogWrite("writing done")
-    if packedStr then
-        LogWrite(tostring(packedStr:byte(1, #packedStr)))
-    end
     local loadedVar, charsConsumed = Serializer.loadVariable(packedStr)
     LogWrite("load done")
     Debug.assert(loadedVar ~= nil, "loadVariable failed")
     Debug.assert(charsConsumed == #packedStr, "loadVariable didn't consume all characters. " .. tostring(charsConsumed) .. ", " .. tostring(#packedStr))
-    Debug.assert(deepCompare(origTable, loadedVar), "loaded table doesn't match the original table")
+    Debug.assert(deepCompare(tbl, loadedVar), "loaded table doesn't match the original table")
 end
 
 ---@param testName string

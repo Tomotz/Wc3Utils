@@ -2,13 +2,13 @@
 --[[
     Standalone test file for Wc3Utils libraries
     This file can run on standard Lua without WC3 runtime
-    
+
     Tests included:
     - test_AddEscaping (StringEscape)
     - test_RemoveEscaping (StringEscape)
     - test_roundtrip (StringEscape)
     - test_dumpLoad (Serializer)
-    
+
     Tests NOT included (require WC3 runtime):
     - test_sync, test_saveLoad, testFileIO, TestOrigSync
 ]]
@@ -58,22 +58,22 @@ BlzSetAbilityTooltip = function(abilityId, tooltip, level) end
 
 -- Load libraries using dofile (no gsub stripping needed - Debug is mocked)
 print("=== Loading StringEscape.lua ===")
-dofile(scriptDir .. "MyLibs/StringEscape.lua")
+dofile(scriptDir .. "lua/MyLibs/StringEscape.lua")
 
 print("=== Loading FileIO.lua ===")
-dofile(scriptDir .. "MyLibs/FileIO.lua")
+dofile(scriptDir .. "lua/MyLibs/FileIO.lua")
 
 print("=== Loading Serializer.lua ===")
-dofile(scriptDir .. "MyLibs/Serializer.lua")
+dofile(scriptDir .. "lua/MyLibs/Serializer.lua")
 
 print("=== Loading TestLib.lua ===")
-dofile(scriptDir .. "TestLib.lua")
+dofile(scriptDir .. "lua/TestLib.lua")
 
 print("=== Libraries loaded successfully ===\n")
 
 -- Modify origTable to remove negative numbers for 32-bit vs 64-bit compatibility
 -- The Serializer uses bitwise operations that behave differently in 32-bit (WC3) vs 64-bit (standard) Lua
-origTable = {
+local origTable = {
     true,
     false,
     1,
@@ -113,7 +113,7 @@ print("============================================================")
 test_AddEscaping()
 test_RemoveEscaping()
 test_roundtrip()
-test_dumpLoad()
+test_dumpLoad(origTable)
 
 print("\n============================================================")
 print("ALL TESTS PASSED!")
