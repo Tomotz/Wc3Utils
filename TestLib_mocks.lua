@@ -459,25 +459,30 @@ end
 -- Ability Tooltip System
 -- ============================================================================
 
----@type table<string, string>
+---@type table<integer, string>
 local abilityTooltips = {}
 
----@param abilityId string
+---@param abilityId integer
 ---@param level integer
 ---@return string
 function BlzGetAbilityTooltip(abilityId, level)
     return abilityTooltips[abilityId] or '!@#$, empty data'
 end
 
----@param abilityId string
+---@param abilityId integer
 ---@param tooltip string
 ---@param level integer
 function BlzSetAbilityTooltip(abilityId, tooltip, level)
     abilityTooltips[abilityId] = tooltip
 end
 
----@param code string
----@return string
+---Convert a 4-character code to an integer (FourCC)
+---@param code string -- 4-character string
+---@return integer
 function FourCC(code)
-    return code
+    local out = 0
+    for i = 1, #code do
+        out = out * 0x100 + string.byte(code, i)
+    end
+    return out
 end
