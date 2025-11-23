@@ -256,8 +256,10 @@ function test_sync()
     LogWrite("test_sync validation done")
 end
 
-function test_saveLoad()
-    local success = Serializer.saveFile(Player(0), origTable, "Savegames\\TestMap\\test_save_load_0.txt")
+---@param tbl any[]? -- optional override of the default origTable
+function test_saveLoad(tbl)
+    tbl = tbl or origTable
+    local success = Serializer.saveFile(Player(0), tbl, "Savegames\\TestMap\\test_save_load_0.txt")
     Debug.assert(success, "saveFile failed")
     LogWrite("saveFile saved")
 
@@ -269,7 +271,7 @@ function test_saveLoad()
             Debug.throwError("loadFile returned nil")
             return
         end
-        Debug.assert(deepCompare(origTable, loadedVars), "loaded table doesn't match the original table")
+        Debug.assert(deepCompare(tbl, loadedVars), "loaded table doesn't match the original table")
         LogWrite("EndFunc test ended! validation done")
         callbackExecuted = true
     end)
