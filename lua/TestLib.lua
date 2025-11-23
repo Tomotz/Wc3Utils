@@ -262,6 +262,7 @@ function test_saveLoad()
     LogWrite("saveFile saved")
 
     -- Doing GetLocalPlayer here to make sure the syncing really work even when running in LAN with 2 players on the same computer
+    local callbackExecuted = false
     local error = Serializer.loadFile(Player(0),"Savegames\\TestMap\\test_save_load_" .. GetPlayerId((GetLocalPlayer())) .. ".txt", function(loadedVars)
         LogWrite("in callback")
         if loadedVars == nil then
@@ -270,9 +271,19 @@ function test_saveLoad()
         end
         Debug.assert(deepCompare(origTable, loadedVars), "loaded table doesn't match the original table")
         LogWrite("EndFunc test ended! validation done")
-
+        callbackExecuted = true
     end)
     LogWrite("loaded returned:", error)
+    
+    -- Wait for the callback to be executed
+    local count = 0
+    while not callbackExecuted and count < 100 do
+        TriggerSleepAction(0.1)
+        count = count + 1
+    end
+    if not callbackExecuted then
+        Debug.throwError("test_saveLoad timed out waiting for callback")
+    end
 end
 
 --- Syncs all the data in input. Must be called from a yieldable coroutine
