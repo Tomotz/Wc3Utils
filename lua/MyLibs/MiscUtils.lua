@@ -3,7 +3,7 @@ do
 
 --[[
 MiscUtils v1.0.0 by Tomotz
-  Small misc utilities that are used in my other libraries, or just weren't enough to warrent their own library.
+  Small misc utilities that are used in my other libraries, or just weren't enough to warrant their own library.
   Some I wrote myself and some I borrowed from others
 
 --- This hook is changing execute func to be a coroutine.
@@ -46,7 +46,7 @@ end
 do --- Table and Array Helpers
 ---@param arr any[]
 ---@param value any
----@return integer? -- first index of value accurance in arr or nil if not found
+---@return integer? -- first index of value occurrence in arr or nil if not found
 function ArrayFind(arr, value)
     for i, v in ipairs(arr) do
         if v == value then
