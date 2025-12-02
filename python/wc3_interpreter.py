@@ -1,6 +1,6 @@
 
 # wc3_interpreter.py
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 
 import os
 import re
@@ -8,7 +8,10 @@ import time
 import signal
 import sys
 import traceback
+import threading
 from typing import Optional
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 # You might need to change `D:` to your Warcraft III installation drive
 CUSTOM_MAP_DATA_PATH = r"D:\Users\{username}\Documents\Warcraft III\CustomMapData\\".format(username=os.getlogin())
@@ -38,6 +41,110 @@ endfunction
 
 LINE_PREFIX = '\n	call Preload( "]]i([['
 LINE_POSTFIX = ']])--[[" )'
+
+# Lua wrapper to make OnInit and its submethods execute immediately instead of registering for later
+# This is needed because when running code via the interpreter, the OnInit phase has already passed
+ONINIT_IMMEDIATE_WRAPPER = """do
+local function _immediateExec(nameOrFunc, func)
+    local f = func or nameOrFunc
+    if type(f) == 'function' then f() end
+end
+local _savedOnInit = OnInit
+OnInit = setmetatable({}, {
+    __call = function(_, ...) _immediateExec(...) end,
+    __index = function() return _immediateExec end
+})
+pcall(function()
+"""
+
+ONINIT_IMMEDIATE_WRAPPER_END = """
+end)
+OnInit = _savedOnInit
+end"""
+
+# Global state for file watching
+watched_files = {}  # filepath -> Observer
+file_watch_lock = threading.Lock()
+
+class FileChangeHandler(FileSystemEventHandler):
+    """Handler for file change events that sends the file to the game"""
+    def __init__(self, filepath: str, send_callback):
+        super().__init__()
+        self.filepath = os.path.abspath(filepath)
+        self.send_callback = send_callback
+        self.last_modified = 0
+    
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        # Check if this is the file we're watching
+        if os.path.abspath(event.src_path) == self.filepath:
+            # Debounce: ignore events within 0.5 seconds of each other
+            current_time = time.time()
+            if current_time - self.last_modified < 0.5:
+                return
+            self.last_modified = current_time
+            print(f"\n[watch] File changed: {self.filepath}")
+            self.send_callback(self.filepath)
+
+def wrap_with_oninit_immediate(content: str) -> str:
+    """Wraps Lua content with OnInit immediate execution wrapper"""
+    return ONINIT_IMMEDIATE_WRAPPER + content + ONINIT_IMMEDIATE_WRAPPER_END
+
+def start_watching(filepath: str, send_callback) -> bool:
+    """Start watching a file for changes. Returns True if successful."""
+    filepath = os.path.abspath(filepath)
+    
+    if not os.path.exists(filepath):
+        print(f"Error: File does not exist: {filepath}")
+        return False
+    
+    with file_watch_lock:
+        if filepath in watched_files:
+            print(f"Already watching: {filepath}")
+            return False
+        
+        directory = os.path.dirname(filepath)
+        handler = FileChangeHandler(filepath, send_callback)
+        observer = Observer()
+        observer.schedule(handler, directory, recursive=False)
+        observer.start()
+        watched_files[filepath] = observer
+        print(f"Now watching: {filepath}")
+        return True
+
+def stop_watching(filepath: str) -> bool:
+    """Stop watching a file. Returns True if successful."""
+    filepath = os.path.abspath(filepath)
+    
+    with file_watch_lock:
+        if filepath not in watched_files:
+            print(f"Not watching: {filepath}")
+            return False
+        
+        observer = watched_files.pop(filepath)
+        observer.stop()
+        observer.join(timeout=1.0)
+        print(f"Stopped watching: {filepath}")
+        return True
+
+def stop_all_watchers():
+    """Stop all file watchers."""
+    with file_watch_lock:
+        for filepath, observer in list(watched_files.items()):
+            observer.stop()
+            observer.join(timeout=1.0)
+        watched_files.clear()
+
+def list_watched_files():
+    """List all currently watched files."""
+    with file_watch_lock:
+        if not watched_files:
+            print("No files being watched.")
+        else:
+            print("Currently watching:")
+            for filepath in watched_files:
+                print(f"  {filepath}")
 
 def load_lua_directory(path: str):
     lua_files = {}
@@ -162,11 +269,44 @@ def remove_all_files():
                 print(f"Error deleting file {file_path}: {e}")
 
 def signal_handler(sig, frame):
-    """On any termination of the program we want to remove the input and output files"""
+    """On any termination of the program we want to remove the input and output files and stop watchers"""
+    stop_all_watchers()
     remove_all_files()
     sys.exit(0)
 
 nextFile = 0
+
+def send_file_to_game(filepath: str):
+    """Send a file to the game with OnInit wrapper applied. Used by both 'file' command and watch callbacks."""
+    global nextFile
+    
+    if not os.path.exists(filepath):
+        print(f"Error: File does not exist: {filepath}")
+        return
+    
+    with open(filepath, 'r', encoding='utf-8') as f:
+        data = f.read()
+    
+    # Wrap with OnInit immediate execution wrapper
+    data = wrap_with_oninit_immediate(data)
+    
+    print(f"Sending file {filepath} to game as in{nextFile}.txt")
+    create_file(FILES_ROOT + f"in{nextFile}.txt", data)
+    
+    # Wait for response
+    while not os.path.exists(FILES_ROOT + f"out{nextFile}.txt"):
+        time.sleep(0.1)
+    
+    try:
+        result = load_file(FILES_ROOT + f"out{nextFile}.txt")
+        if result != b"nil" and result != "nil":
+            print(result)
+    except Exception as e:
+        print("failed. Got exception: ", e)
+        traceback.print_exc()
+    
+    nextFile += 1
+
 def main():
     global nextFile
     remove_all_files()
@@ -181,8 +321,13 @@ def main():
     print(f"Wc3 Interpreter {VERSION}. For help, type `help`.")
     while True:
         # get console input
-        command = input(str(nextFile) + " >>> ")
+        try:
+            command = input(str(nextFile) + " >>> ")
+        except EOFError:
+            break
+        
         if command == "exit":
+            stop_all_watchers()
             remove_all_files()
             break
         elif command == "help":
@@ -192,10 +337,15 @@ def main():
             print("  restart - Cleans the state to allow a new game to be started (this is the same as exiting and restarting the script)")
             print("  jump <number> - use in case of closing the interpreter (or crashing) while game is still running. Starts sending commands from a specific file index. Should use the index printed in the prompt before the `>>>`")
             print("  file <full file path> - send a file with lua commands to the game. end the file with `return <data>` to print the data to the console")
+            print("  watch <full file path> - watch a file for changes and automatically send it to the game on each update")
+            print("  unwatch <full file path> - stop watching a file")
+            print("  watching - list all files currently being watched")
             print("  <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.")
             print("** Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **")
+            print("** Note: OnInit calls in files sent via 'file' or 'watch' are automatically executed immediately **")
             continue
         elif command == "restart":
+            stop_all_watchers()
             remove_all_files()
             nextFile = 0
             print("State reset. You can start a new game now.")
@@ -203,15 +353,21 @@ def main():
         elif command.startswith("jump "):
             nextFile = int(command[5:].strip())
             continue
+        elif command.startswith("watch "):
+            filepath = command[6:].strip()
+            start_watching(filepath, send_file_to_game)
+            continue
+        elif command.startswith("unwatch "):
+            filepath = command[8:].strip()
+            stop_watching(filepath)
+            continue
+        elif command == "watching":
+            list_watched_files()
+            continue
         elif command.startswith("file "):
             filepath = command[5:].strip()
-            if os.path.exists(filepath):
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    data = f.read()
-                print(f"Sent file {filepath} to game as in{nextFile}.txt")
-            else:
-                print(f"File `{filepath}` does not exist.")
-                continue
+            send_file_to_game(filepath)
+            continue
         else:
             data = command
         if data == "":
@@ -221,7 +377,7 @@ def main():
             time.sleep(0.1)
         try:
             result = load_file(FILES_ROOT + f"out{nextFile}.txt")
-            if result != "nil":
+            if result != b"nil" and result != "nil":
                 print(result)
         except Exception as e:
             print("failed. Got exception: ", e)
