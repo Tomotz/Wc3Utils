@@ -82,12 +82,15 @@ local onInitCallbacks = {
 ---@field final fun(func:fun())
 
 ---@type OnInitLib
-OnInit = {
+OnInit = setmetatable({
     map = function(func) table.insert(onInitCallbacks.map, func) end,
     global = function(func) table.insert(onInitCallbacks.global, func) end,
     trig = function(func) table.insert(onInitCallbacks.trig, func) end,
     final = function(func) table.insert(onInitCallbacks.final, func) end
-}
+}, {
+    -- Allow OnInit to be called directly as OnInit(func), which defaults to OnInit.final
+    __call = function(_, func) table.insert(onInitCallbacks.final, func) end
+})
 
 ---Execute all registered OnInit callbacks in order
 function executeOnInitCallbacks()
@@ -336,25 +339,35 @@ local runningCoroutines = {}
 
 ---@param duration number
 function TriggerSleepAction(duration)
-    local co = coroutine.running()
+    local co, isMain = coroutine.running()
     
     currentTime = currentTime + duration
     
     for _, timer in ipairs(activeTimers) do
         while timer._active and timer._nextTrigger <= currentTime do
+            -- Save the nextTrigger before callback in case callback reschedules
+            local triggerTimeBefore = timer._nextTrigger
             if timer._callback then
                 timer._callback()
             end
+            -- Only deactivate if the timer wasn't rescheduled by the callback
+            -- (i.e., nextTrigger is still the same as before the callback)
             if timer._periodic then
                 timer._nextTrigger = timer._nextTrigger + timer._timeout
-            else
+            elseif timer._nextTrigger == triggerTimeBefore then
+                -- Timer wasn't rescheduled by callback, so deactivate it
                 timer._active = false
+                break
+            else
+                -- Timer was rescheduled by callback (nextTrigger changed), keep it active
                 break
             end
         end
     end
     
-    if not co then
+    -- In Lua 5.3+, coroutine.running() returns (thread, isMain) where isMain is true for main thread
+    -- Don't yield if we're in the main thread or not in a coroutine
+    if not co or isMain then
         return
     end
     
