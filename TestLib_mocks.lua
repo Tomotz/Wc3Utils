@@ -82,12 +82,15 @@ local onInitCallbacks = {
 ---@field final fun(func:fun())
 
 ---@type OnInitLib
-OnInit = {
+OnInit = setmetatable({
     map = function(func) table.insert(onInitCallbacks.map, func) end,
     global = function(func) table.insert(onInitCallbacks.global, func) end,
     trig = function(func) table.insert(onInitCallbacks.trig, func) end,
     final = function(func) table.insert(onInitCallbacks.final, func) end
-}
+}, {
+    -- Allow OnInit to be called directly as OnInit(func), which defaults to OnInit.final
+    __call = function(_, func) table.insert(onInitCallbacks.final, func) end
+})
 
 ---Execute all registered OnInit callbacks in order
 function executeOnInitCallbacks()
