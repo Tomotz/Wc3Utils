@@ -32,6 +32,9 @@ function TableToStr(tbl)
     return table.concat(out, "")
 end
 
+local initDone = false
+OnInit.final(function() initDone = true end)
+
 ---@param arg any
 ---@return string -- returns a pretty string representation of the argument -- note that `pairs` is used, so the result is not synced between players
 function PrettyString(arg)
@@ -43,7 +46,8 @@ function PrettyString(arg)
             return tostring(arg)
         end
         local id = GetObjectTypeId(arg)
-        return type .. ": " .. GetObjectName(id) .. "('" .. FourCC2Str(id) .. "')"
+        local name = initDone and GetObjectName(arg) or "" -- using GetObjectName during init can cause crashes
+        return type .. ": " .. name .. "('" .. FourCC2Str(id) .. "')"
     end
     return tostring(arg)
 end
