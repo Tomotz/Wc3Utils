@@ -68,6 +68,31 @@ local isDisabled ---@type boolean
 EnabledBreakpoints = {} ---@type table<string | integer, boolean> -- saves for each breakpoint id if it is disabled. Allows the debugger to disable/enable bps
 
 local nextBpFile = 0
+
+--- Helper to format output for breakpoint responses
+---@param value any
+---@return string
+local function formatBreakpointOutput(value)
+    if PrettyString then
+        return PrettyString(value)
+    end
+    return tostring(value)
+end
+
+--- Create an environment table that includes localVariables with globals as fallback
+---@param localVariables table<string, any>?
+---@return table
+local function createBreakpointEnv(localVariables)
+    local env = {}
+    setmetatable(env, {__index = _G})
+    if localVariables then
+        for k, v in pairs(localVariables) do
+            env[k] = v
+        end
+    end
+    return env
+end
+
 --- Put a breakpoint in your code that will halt execution of a function and wait for external debugger instructions.
 ---@param breakpointId integer | string -- Unique id for the breakpoint. Used for auto breakpoints set from the debugger. When called from user code, it should contain a unique string (that is not a number) to allow you to recognise the breakpoint.
 ---@param localVariables table<string, any>? -- a table mapping a local variable name to it's value. Will be used as the environment in the code called from the debugger. Note that for manual breakpoints, if you want to access locals from the debugger, you need to pass them here, and update them after the breakpoint finishes.
@@ -86,19 +111,32 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
         return
     end
     if EnabledBreakpoints[breakpointId] == nil then
-
         EnabledBreakpoints[breakpointId] = (startsEnabled == nil) or startsEnabled
     end
     if EnabledBreakpoints[breakpointId] == false then return end
     if condition then
         local cond = load(condition)
         if cond == nil then
-            Debug.throwError("error executing breakpoint condition")
+            if Debug then Debug.throwError("error executing breakpoint condition") end
             return
         end
         if not cond() then return end
     end
-    local outData = tostring(breakpointId)
+
+    -- Create environment with locals and globals accessible
+    local env = createBreakpointEnv(localVariables)
+
+    -- Initial output: breakpoint ID and available local variables
+    local outData = "BREAKPOINT_HIT:" .. tostring(breakpointId)
+    if localVariables then
+        local varNames = {}
+        for k, _ in pairs(localVariables) do
+            table.insert(varNames, k)
+        end
+        if #varNames > 0 then
+            outData = outData .. "\nLocal variables: " .. table.concat(varNames, ", ")
+        end
+    end
 
     while true do
         FileIO.Save(FILES_ROOT .. "\\out_bp" .. nextBpFile .. ".txt", outData)
@@ -106,14 +144,22 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
         while true do
             commands = FileIO.Load(FILES_ROOT .. "\\bp_in" .. nextBpFile .. ".txt")
             if commands ~= nil then break end
-            TriggerSleepAction(1)
+            TriggerSleepAction(0.5)
         end
         nextBpFile = nextBpFile + 1
         if commands == "continue" then return end
-        local cur_func = load(commands, nil, nil, localVariables)
-        outData = "nil"
-        if cur_func ~= nil then
-            outData = cur_func()
+
+        -- Execute the command with proper error handling
+        local cur_func, loadErr = load(commands, "breakpoint_cmd", "t", env)
+        if cur_func == nil then
+            outData = "Syntax error: " .. tostring(loadErr)
+        else
+            local ok, result = pcall(cur_func)
+            if ok then
+                outData = formatBreakpointOutput(result)
+            else
+                outData = "Runtime error: " .. tostring(result)
+            end
         end
     end
 end
