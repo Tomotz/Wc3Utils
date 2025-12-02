@@ -121,8 +121,8 @@ end
 local nextFile = 0
 local curPeriod = PERIOD
 local lastCommandExecuteTime = 0
+local timer = nil ---@type timer?
 function CheckFiles()
-    local timer = GetExpiredTimer()
     --- first we trigger the next run in case this run crashes or returns
     TimerStart(timer, curPeriod, false, CheckFiles)
     -- To make the replay as close as possible to the original game, we do call the timer on both, and just return right away if multiplayer
@@ -150,7 +150,8 @@ end
 function TryInterpret()
     isDisabled = ((not GameStatus) or GameStatus == GAME_STATUS_ONLINE) and (not bj_isSinglePlayer)
     -- Timer is leaked on purpose to keep it running throughout the entire game
-    TimerStart(CreateTimer(), 5, false, CheckFiles)
+    timer = CreateTimer()
+    TimerStart(timer, 5, false, CheckFiles)
 end
 
 OnInit(TryInterpret)
