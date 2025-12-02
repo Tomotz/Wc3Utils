@@ -520,36 +520,6 @@ function test_createBreakpointEnv_includes_globals()
     print("--- test_createBreakpointEnv_includes_globals completed ---")
 end
 
-function test_formatBreakpointOutput_with_PrettyString()
-    print("\n--- Running test_formatBreakpointOutput_with_PrettyString ---")
-    resetState()
-    
-    -- Test that formatBreakpointOutput uses PrettyString when available
-    -- Since PrettyString might not be loaded in standalone tests, we mock it
-    
-    local originalPrettyString = PrettyString
-    local prettyStringCalled = false
-    PrettyString = function(value)
-        prettyStringCalled = true
-        return "PRETTY:" .. tostring(value)
-    end
-    
-    -- The formatBreakpointOutput function is local to LiveCoding.lua,
-    -- so we test it indirectly by checking that PrettyString would be called
-    -- if it exists. Since we can't call the local function directly,
-    -- we verify the behavior through the breakpoint output.
-    
-    -- For now, just verify PrettyString is callable
-    local result = PrettyString("test")
-    Debug.assert(result == "PRETTY:test", "PrettyString mock should work")
-    Debug.assert(prettyStringCalled, "PrettyString should have been called")
-    
-    -- Restore original
-    PrettyString = originalPrettyString
-    
-    print("--- test_formatBreakpointOutput_with_PrettyString completed ---")
-end
-
 function test_Breakpoint_error_handling_in_condition()
     print("\n--- Running test_Breakpoint_error_handling_in_condition ---")
     resetState()
@@ -614,7 +584,6 @@ test_Breakpoint_not_yieldable()
 test_Breakpoint_shows_local_variables()
 test_Breakpoint_output_format_without_locals()
 test_createBreakpointEnv_includes_globals()
-test_formatBreakpointOutput_with_PrettyString()
 test_Breakpoint_error_handling_in_condition()
 
 print("\n============================================================")
