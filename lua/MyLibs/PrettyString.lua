@@ -19,11 +19,17 @@ end
 ---@return string -- note that `pairs` is used, so the result is not synced between players
 function TableToStr(tbl)
     local out = {}
+    table.insert(out, "{")
     for k, v in pairs(tbl) do
-        table.insert(out, PrettyString(k) .. ": " .. PrettyString(v))
+        table.insert(out, PrettyString(k))
+        table.insert(out, ": ")
+        table.insert(out, PrettyString(v))
+        if next(tbl, k) ~= nil then
+            table.insert(out, ", ")
+        end
     end
-    local full = table.concat(out, ", ")
-    return "{" .. full .. "}"
+    table.insert(out, "}")
+    return table.concat(out, "")
 end
 
 ---@param arg any
