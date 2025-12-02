@@ -1,0 +1,48 @@
+name: Run Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lua-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Lua
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y lua5.3
+
+    - name: Run Lua standalone tests
+      run: |
+        cd tests
+        lua TestLib_standalone.lua
+        lua TestLiveCoding_standalone.lua
+
+  python-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        cd python
+        pip install -r requirements.txt pytest
+
+    - name: Run Python tests
+      run: |
+        cd python
+        python -m pytest test_wc3_interpreter.py -v
