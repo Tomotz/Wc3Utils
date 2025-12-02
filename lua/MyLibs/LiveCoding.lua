@@ -1,6 +1,6 @@
-if Debug then Debug.beginFile("Interpreter") end
+if Debug then Debug.beginFile("LiveCoding") end
 --[[
-Interpreter v1.0.1 by Tomotz
+Lua Live Coding v1.1.0 by Tomotz
 This tool allows connecting to your game with an external cli, and run lua code in it - it allows you to open a windows terminal and run code inside your game. Works for single player and in replays
 
 Features:
@@ -24,6 +24,9 @@ cli commands:
  - exit - Exit the program
  - restart - Cleans the state to allow a new game to be started (this is the same as exiting and restarting the script)
  - file <full file path> - send a file with lua commands to the game. end the file with `return <data>` to print the data to the console
+ - watch <full file path> - send a file to the game on each change. print the result just like `file`.
+ - unwatch <full file path> - stop watching a file
+ - watching - list all currently watched files
  - <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.
 * Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **
 Requires:
