@@ -68,7 +68,7 @@ if Debug then Debug.beginFile("FileIO") end
         local prefix = isLoadable and RAW_PREFIX or ''
         local suffix = isLoadable and RAW_SUFFIX or ''
         local curPos = 1
-        while curPos < #s do
+        while curPos <= #s do
             local chunk = s:sub(curPos, curPos + maxSize - 1)
             local lastChar = #chunk
             if not isLoadable then

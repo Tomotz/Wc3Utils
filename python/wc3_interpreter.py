@@ -60,6 +60,7 @@ LINE_POSTFIX = ']])--[[" )'
 
 # Lua wrapper to make OnInit and its submethods execute immediately instead of registering for later
 # This is needed because when running code via the interpreter, the OnInit phase has already passed
+# The wrapper also captures and returns the result of the file's return statement
 ONINIT_IMMEDIATE_WRAPPER = """do
 local function _immediateExec(nameOrFunc, func)
     local f = func or nameOrFunc
@@ -70,12 +71,24 @@ OnInit = setmetatable({}, {
     __call = function(_, ...) _immediateExec(...) end,
     __index = function() return _immediateExec end
 })
-pcall(function()
+
+local __wc3_interpreter_result
+local function __wc3_interpreter_run()
+    __wc3_interpreter_result = (function()
 """
 
 ONINIT_IMMEDIATE_WRAPPER_END = """
-end)
+    end)()
+end
+
+local ok, err = pcall(__wc3_interpreter_run)
 OnInit = _savedOnInit
+
+if not ok then
+    error(err)
+end
+
+return __wc3_interpreter_result
 end"""
 
 # Global state for file watching
@@ -297,8 +310,13 @@ def signal_handler(sig, frame):
 nextFile = 0
 send_lock = threading.Lock()  # Thread safety for nextFile and file I/O
 
-def send_data_to_game(data: str):
-    """Send data to the game and wait for response. Thread-safe."""
+def send_data_to_game(data: str, print_prompt_after: bool = False):
+    """Send data to the game and wait for response. Thread-safe.
+    
+    Args:
+        data: The Lua code to send to the game
+        print_prompt_after: If True, print the prompt after the result (used for file/watch commands)
+    """
     global nextFile
     if data == "":
         return
@@ -314,6 +332,8 @@ def send_data_to_game(data: str):
             print("failed. Got exception: ", e)
             traceback.print_exc()
         nextFile += 1
+        if print_prompt_after:
+            print(f"{nextFile} >>> ", end="", flush=True)
 
 def send_file_to_game(filepath: str):
     """Send a file to the game with OnInit wrapper applied. Used by both 'file' command and watch callbacks."""
@@ -328,7 +348,7 @@ def send_file_to_game(filepath: str):
     data = wrap_with_oninit_immediate(data)
     
     print(f"Sending file {filepath} to game")
-    send_data_to_game(data)
+    send_data_to_game(data, print_prompt_after=True)
 
 def main():
     global nextFile
