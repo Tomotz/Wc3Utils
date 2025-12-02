@@ -499,3 +499,43 @@ function FourCC(code)
     end
     return out
 end
+
+-- ============================================================================
+-- Async Test Runner
+-- ============================================================================
+
+---Helper function to run async tests in coroutines
+---@param testName string
+---@param testFunc fun()
+function runAsyncTest(testName, testFunc)
+    print("\n--- Running " .. testName .. " ---")
+    local co = coroutine.create(testFunc)
+    local success, err = coroutine.resume(co)
+    if not success then
+        error("Test " .. testName .. " failed: " .. tostring(err))
+    end
+    
+    -- Process coroutines until the test coroutine is done
+    -- Note: TriggerSleepAction now handles time advancement and timer processing
+    local maxIterations = 10000
+    local iterations = 0
+    while coroutine.status(co) ~= "dead" and iterations < maxIterations do
+        -- Resume any coroutines that are ready using the helper from mocks
+        if coroutine.status(co) ~= "dead" and getRunningCoroutineCount() == 0 then
+            error("Test " .. testName .. " is stuck with no coroutines waiting")
+        end
+        
+        processTimersAndCoroutines()
+        iterations = iterations + 1
+    end
+    
+    if iterations >= maxIterations then
+        error("Test " .. testName .. " timed out after " .. maxIterations .. " iterations")
+    end
+    
+    -- Clean up any remaining coroutines after the test completes
+    -- Note: Do NOT clear activeTimers as they may be needed by subsequent tests (e.g., SyncStream timer)
+    clearRunningCoroutines()
+    
+    print("--- " .. testName .. " completed ---")
+end

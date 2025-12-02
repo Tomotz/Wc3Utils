@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch, MagicMock
 
 # Import the module under test
@@ -339,86 +340,84 @@ class TestFileFormat(unittest.TestCase):
         self.assertIn("]])", LINE_POSTFIX)
 
 
+@contextmanager
+def mock_main_environment(commands, capture_print=False, track_calls=False):
+    """Context manager to set up common mocks for testing main().
+    
+    Args:
+        commands: List of commands to simulate user input
+        capture_print: If True, captures print output and yields it as a list
+        track_calls: If True, tracks calls to remove_all_files and stop_all_watchers
+    
+    Yields:
+        dict with 'output' (if capture_print), 'remove_calls' and 'stop_calls' (if track_calls)
+    """
+    command_iter = iter(commands)
+    result = {}
+    
+    def fake_input(prompt):
+        return next(command_iter)
+    
+    patches = [
+        patch.object(wc3_interpreter, 'input', side_effect=fake_input),
+        patch.object(wc3_interpreter.signal, 'signal'),
+    ]
+    
+    if capture_print:
+        result['output'] = []
+        def fake_print(*args, **kwargs):
+            result['output'].append(' '.join(str(a) for a in args))
+        patches.append(patch('builtins.print', side_effect=fake_print))
+    else:
+        patches.append(patch('builtins.print'))
+    
+    if track_calls:
+        result['remove_calls'] = []
+        result['stop_calls'] = []
+        def mock_remove():
+            result['remove_calls'].append(True)
+        def mock_stop():
+            result['stop_calls'].append(True)
+        patches.append(patch.object(wc3_interpreter, 'remove_all_files', side_effect=mock_remove))
+        patches.append(patch.object(wc3_interpreter, 'stop_all_watchers', side_effect=mock_stop))
+    else:
+        patches.append(patch.object(wc3_interpreter, 'remove_all_files'))
+        patches.append(patch.object(wc3_interpreter, 'stop_all_watchers'))
+    
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        yield result
+
+
 class TestMainCommand(unittest.TestCase):
     """Tests for the main() function and command handling."""
 
     def test_main_handles_exit_command(self):
         """Test that main() exits cleanly when 'exit' is entered."""
-        commands = iter(["exit"])
-        
-        def fake_input(prompt):
-            return next(commands)
-        
-        with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
-             patch.object(wc3_interpreter, 'remove_all_files'), \
-             patch.object(wc3_interpreter, 'stop_all_watchers'), \
-             patch.object(wc3_interpreter.signal, 'signal'):
-            # main() should exit without error
+        with mock_main_environment(["exit"]):
             wc3_interpreter.main()
 
     def test_main_handles_help_command(self):
         """Test that main() handles the 'help' command."""
-        commands = iter(["help", "exit"])
-        output_lines = []
-        
-        def fake_input(prompt):
-            return next(commands)
-        
-        def fake_print(*args, **kwargs):
-            output_lines.append(' '.join(str(a) for a in args))
-        
-        with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
-             patch.object(wc3_interpreter, 'remove_all_files'), \
-             patch.object(wc3_interpreter, 'stop_all_watchers'), \
-             patch.object(wc3_interpreter.signal, 'signal'), \
-             patch('builtins.print', side_effect=fake_print):
+        with mock_main_environment(["help", "exit"], capture_print=True) as ctx:
             wc3_interpreter.main()
         
-        # Check that help output was printed
-        help_output = '\n'.join(output_lines)
+        help_output = '\n'.join(ctx['output'])
         self.assertIn("Available commands", help_output)
         self.assertIn("file", help_output)
 
     def test_main_handles_restart_command(self):
         """Test that main() handles the 'restart' command."""
-        commands = iter(["restart", "exit"])
-        
-        def fake_input(prompt):
-            return next(commands)
-        
-        remove_all_files_called = []
-        stop_all_watchers_called = []
-        
-        def mock_remove_all_files():
-            remove_all_files_called.append(True)
-        
-        def mock_stop_all_watchers():
-            stop_all_watchers_called.append(True)
-        
-        with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
-             patch.object(wc3_interpreter, 'remove_all_files', side_effect=mock_remove_all_files), \
-             patch.object(wc3_interpreter, 'stop_all_watchers', side_effect=mock_stop_all_watchers), \
-             patch.object(wc3_interpreter.signal, 'signal'), \
-             patch('builtins.print'):
+        with mock_main_environment(["restart", "exit"], track_calls=True) as ctx:
             wc3_interpreter.main()
         
         # restart calls remove_all_files and stop_all_watchers, plus initial remove_all_files
         # and exit also calls them
-        self.assertGreaterEqual(len(remove_all_files_called), 2)
-        self.assertGreaterEqual(len(stop_all_watchers_called), 1)
+        self.assertGreaterEqual(len(ctx['remove_calls']), 2)
+        self.assertGreaterEqual(len(ctx['stop_calls']), 1)
 
     def test_main_handles_jump_command(self):
         """Test that main() handles the 'jump' command."""
-        commands = iter(["jump 5", "exit"])
-        
-        def fake_input(prompt):
-            return next(commands)
-        
-        with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
-             patch.object(wc3_interpreter, 'remove_all_files'), \
-             patch.object(wc3_interpreter, 'stop_all_watchers'), \
-             patch.object(wc3_interpreter.signal, 'signal'), \
-             patch('builtins.print'):
+        with mock_main_environment(["jump 5", "exit"]):
             wc3_interpreter.main()
         
         # After jump 5, nextFile should be 5

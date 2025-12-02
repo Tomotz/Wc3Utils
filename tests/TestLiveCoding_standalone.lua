@@ -65,33 +65,7 @@ local function getNextFileIndex()
     return idx
 end
 
--- Helper function to run async tests in coroutines
-local function runAsyncTest(testName, testFunc)
-    print("\n--- Running " .. testName .. " ---")
-    local co = coroutine.create(testFunc)
-    local success, err = coroutine.resume(co)
-    if not success then
-        error("Test " .. testName .. " failed: " .. tostring(err))
-    end
-    
-    local maxIterations = 10000
-    local iterations = 0
-    while coroutine.status(co) ~= "dead" and iterations < maxIterations do
-        if coroutine.status(co) ~= "dead" and getRunningCoroutineCount() == 0 then
-            error("Test " .. testName .. " is stuck with no coroutines waiting")
-        end
-        
-        processTimersAndCoroutines()
-        iterations = iterations + 1
-    end
-    
-    if iterations >= maxIterations then
-        error("Test " .. testName .. " timed out after " .. maxIterations .. " iterations")
-    end
-    
-    clearRunningCoroutines()
-    print("--- " .. testName .. " completed ---")
-end
+-- Note: runAsyncTest is provided by TestLib_mocks.lua
 
 -- ============================================================================
 -- Tests for TryInterpret

@@ -174,6 +174,44 @@ local origTable = {
     { mixed = { "string", 123, true, false, 0, { nested = "inside" } } },  -- Mixed types
     { largeNumbers = { 0x40000000, 0x7FFFFFFF, 0x80000000, 0xBFFFFFFF } },  -- Large numbers (2^30, 2^31-1, -2^31, -2^30)
 }
+
+--- Creates a version of origTable compatible with 64-bit Lua (standalone testing).
+--- Filters out 32-bit specific values that behave differently in 64-bit Lua due to
+--- bitwise operations (negative numbers represented as large unsigned integers in 32-bit).
+---@return any[]
+function TestLib_getStandaloneOrigTable()
+    return {
+        true,
+        false,
+        1,
+        -- -1, -- removed: only works for 32 bit lua
+        0,
+        255,
+        256^2 - 1,
+        0x7FFFFFFF, -- the maximum positive integer
+        0x7FFFFFFF, -- the maximum positive integer
+        -- 0xFFFFFFFF, -- removed: -1 in 32-bit
+        -- 0x80000000, -- removed: the minimum negative integer in 32-bit
+        math.pi,
+        "hello",
+        "\0\10\13\91\92\93\248\249\250\251\252\253",
+        string.rep("s", 257 ),
+        "",
+        "h",
+        "ab!!",
+        {},  -- Empty table
+        { key1 = "value1", key2 = "value2" },  -- Table with string keys
+        { 100, 200, 300 },  -- Table with only numeric values
+        { 0, 1, 2, 1000, 256^3 },  -- Table with growing values
+        { 256^3, 1000, 2, 1, 0 },  -- Table with decreasing values
+        { [1] = "a", [3] = "c", [5] = "e" },  -- Sparse array
+        { nested = { a = 1, b = { c = 2, d = { e = 3 } } } },  -- Deeply nested table
+        { { { { { "deep" } } } } },  -- Extreme nesting level
+        { special = { "\x0A", "\x09", "\x0D", "\x00", "\x5D", "\x5C" } },  -- Special characters (\n, \t, \r, \0, ], \)
+        { mixed = { "string", 123, true, false, 0, { nested = "inside" } } },  -- Mixed types
+        { largeNumbers = { 0x40000000, 0x7FFFFFFF } },  -- Large numbers (2^30, 2^31-1) - removed negative numbers
+    }
+end
 -- for i=0, 255 do
 --     origTable[#origTable + 1] = string.char(i)
 -- end
