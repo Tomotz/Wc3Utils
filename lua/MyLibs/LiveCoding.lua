@@ -147,11 +147,12 @@ function CheckFiles()
     end
 end
 
-function TryInterpret()
+---@param period number? -- Optional period in seconds for polling. Defaults to 5 seconds. Useful for testing with shorter periods.
+function TryInterpret(period)
     isDisabled = ((not GameStatus) or GameStatus == GAME_STATUS_ONLINE) and (not bj_isSinglePlayer)
     -- Timer is leaked on purpose to keep it running throughout the entire game
     timer = CreateTimer()
-    TimerStart(timer, 5, false, CheckFiles)
+    TimerStart(timer, period or 5, false, CheckFiles)
 end
 
 OnInit(TryInterpret)

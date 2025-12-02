@@ -23,19 +23,19 @@ dofile(scriptDir .. "TestLib_mocks.lua")
 
 -- Load libraries using dofile (no gsub stripping needed - Debug is mocked)
 print("=== Loading StringEscape.lua ===")
-dofile(scriptDir .. "lua/MyLibs/StringEscape.lua")
+dofile(scriptDir .. "../lua/MyLibs/StringEscape.lua")
 
 print("=== Loading FileIO.lua ===")
-dofile(scriptDir .. "lua/MyLibs/FileIO.lua")
+dofile(scriptDir .. "../lua/MyLibs/FileIO.lua")
 
 print("=== Loading SyncStream.lua ===")
-dofile(scriptDir .. "lua/MyLibs/SyncStream.lua")
+dofile(scriptDir .. "../lua/MyLibs/SyncStream.lua")
 
 print("=== Loading Serializer.lua ===")
-dofile(scriptDir .. "lua/MyLibs/Serializer.lua")
+dofile(scriptDir .. "../lua/MyLibs/Serializer.lua")
 
 print("=== Loading TestLib.lua ===")
-dofile(scriptDir .. "lua/TestLib.lua")
+dofile(scriptDir .. "../lua/TestLib.lua")
 
 print("=== Executing OnInit callbacks ===")
 executeOnInitCallbacks()

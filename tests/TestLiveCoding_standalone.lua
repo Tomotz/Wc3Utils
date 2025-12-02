@@ -20,7 +20,7 @@ local scriptPath = debug.getinfo(1, "S").source:match("@(.*)$")
 local scriptDir = scriptPath:match("(.*[\\/])") or "./"
 
 -- Load WC3 mocks
-dofile(scriptDir .. "../TestLib_mocks.lua")
+dofile(scriptDir .. "TestLib_mocks.lua")
 
 -- Add additional mocks needed for LiveCoding.lua
 GAME_STATUS_OFFLINE = 0
@@ -31,13 +31,13 @@ bj_isSinglePlayer = true
 
 -- Load required libraries
 print("=== Loading StringEscape.lua ===")
-dofile(scriptDir .. "MyLibs/StringEscape.lua")
+dofile(scriptDir .. "../lua/MyLibs/StringEscape.lua")
 
 print("=== Loading FileIO.lua ===")
-dofile(scriptDir .. "MyLibs/FileIO.lua")
+dofile(scriptDir .. "../lua/MyLibs/FileIO.lua")
 
 print("=== Loading LiveCoding.lua ===")
-dofile(scriptDir .. "MyLibs/LiveCoding.lua")
+dofile(scriptDir .. "../lua/MyLibs/LiveCoding.lua")
 
 print("=== Executing OnInit callbacks ===")
 executeOnInitCallbacks()
@@ -105,17 +105,15 @@ function test_TryInterpret_disabled_in_multiplayer()
     GameStatus = GAME_STATUS_ONLINE
     bj_isSinglePlayer = false
     
-    -- Call TryInterpret
-    TryInterpret()
-    
-    -- The interpreter should be disabled (isDisabled is local, so we test indirectly)
-    -- We can test by checking that CheckFiles returns early without doing anything
-    -- Save a command file and verify it's not executed
+    -- Save a command file before calling TryInterpret
     local fileIdx = getNextFileIndex()
     FileIO.Save("Interpreter\\in" .. fileIdx .. ".txt", "return 'should_not_execute'")
     
-    -- Run CheckFiles
-    CheckFiles()
+    -- Call TryInterpret with short period for fast testing
+    TryInterpret(0.01)
+    
+    -- Advance time to trigger the timer (which calls CheckFiles)
+    TriggerSleepAction(0.02)
     
     -- The output file should not exist because the interpreter is disabled
     local result = FileIO.Load("Interpreter\\out" .. fileIdx .. ".txt")
@@ -135,15 +133,15 @@ function test_TryInterpret_enabled_in_singleplayer()
     GameStatus = GAME_STATUS_OFFLINE
     bj_isSinglePlayer = true
     
-    -- Call TryInterpret
-    TryInterpret()
-    
-    -- Save a command file
+    -- Save a command file before calling TryInterpret
     local fileIdx = getNextFileIndex()
     FileIO.Save("Interpreter\\in" .. fileIdx .. ".txt", "return 'executed'")
     
-    -- Run CheckFiles
-    CheckFiles()
+    -- Call TryInterpret with short period for fast testing
+    TryInterpret(0.01)
+    
+    -- Advance time to trigger the timer (which calls CheckFiles)
+    TriggerSleepAction(0.02)
     
     -- The output file should exist with the result
     local result = FileIO.Load("Interpreter\\out" .. fileIdx .. ".txt")
@@ -160,15 +158,15 @@ function test_TryInterpret_enabled_in_replay()
     GameStatus = GAME_STATUS_REPLAY
     bj_isSinglePlayer = false
     
-    -- Call TryInterpret
-    TryInterpret()
-    
-    -- Save a command file
+    -- Save a command file before calling TryInterpret
     local fileIdx = getNextFileIndex()
     FileIO.Save("Interpreter\\in" .. fileIdx .. ".txt", "return 'replay_executed'")
     
-    -- Run CheckFiles
-    CheckFiles()
+    -- Call TryInterpret with short period for fast testing
+    TryInterpret(0.01)
+    
+    -- Advance time to trigger the timer (which calls CheckFiles)
+    TriggerSleepAction(0.02)
     
     -- The output file should exist with the result
     local result = FileIO.Load("Interpreter\\out" .. fileIdx .. ".txt")
@@ -188,17 +186,19 @@ function test_CheckFiles_executes_command()
     -- Enable interpreter
     GameStatus = GAME_STATUS_OFFLINE
     bj_isSinglePlayer = true
-    TryInterpret()
     
     -- Create a global variable to track execution
     _G.testExecuted = false
     
-    -- Save a command that sets the global variable
+    -- Save a command that sets the global variable before calling TryInterpret
     local fileIdx = getNextFileIndex()
     FileIO.Save("Interpreter\\in" .. fileIdx .. ".txt", "_G.testExecuted = true")
     
-    -- Run CheckFiles
-    CheckFiles()
+    -- Call TryInterpret with short period for fast testing
+    TryInterpret(0.01)
+    
+    -- Advance time to trigger the timer (which calls CheckFiles)
+    TriggerSleepAction(0.02)
     
     -- Verify the command was executed
     Debug.assert(_G.testExecuted == true, "Command was not executed")
@@ -216,14 +216,16 @@ function test_CheckFiles_handles_return_value()
     -- Enable interpreter
     GameStatus = GAME_STATUS_OFFLINE
     bj_isSinglePlayer = true
-    TryInterpret()
     
-    -- Save a command with a return value
+    -- Save a command with a return value before calling TryInterpret
     local fileIdx = getNextFileIndex()
     FileIO.Save("Interpreter\\in" .. fileIdx .. ".txt", "return 42")
     
-    -- Run CheckFiles
-    CheckFiles()
+    -- Call TryInterpret with short period for fast testing
+    TryInterpret(0.01)
+    
+    -- Advance time to trigger the timer (which calls CheckFiles)
+    TriggerSleepAction(0.02)
     
     -- Verify the output file contains the return value
     local result = FileIO.Load("Interpreter\\out" .. fileIdx .. ".txt")
@@ -239,14 +241,16 @@ function test_CheckFiles_handles_nil_return()
     -- Enable interpreter
     GameStatus = GAME_STATUS_OFFLINE
     bj_isSinglePlayer = true
-    TryInterpret()
     
-    -- Save a command without a return value
+    -- Save a command without a return value before calling TryInterpret
     local fileIdx = getNextFileIndex()
     FileIO.Save("Interpreter\\in" .. fileIdx .. ".txt", "local x = 1")
     
-    -- Run CheckFiles
-    CheckFiles()
+    -- Call TryInterpret with short period for fast testing
+    TryInterpret(0.01)
+    
+    -- Advance time to trigger the timer (which calls CheckFiles)
+    TriggerSleepAction(0.02)
     
     -- Verify the output file contains "nil"
     local result = FileIO.Load("Interpreter\\out" .. fileIdx .. ".txt")
@@ -262,19 +266,28 @@ function test_CheckFiles_sequential_commands()
     -- Enable interpreter
     GameStatus = GAME_STATUS_OFFLINE
     bj_isSinglePlayer = true
-    TryInterpret()
     
-    -- Save first command
+    -- Save first command before calling TryInterpret
     local fileIdx1 = getNextFileIndex()
     FileIO.Save("Interpreter\\in" .. fileIdx1 .. ".txt", "return 'first'")
-    CheckFiles()
+    
+    -- Call TryInterpret with short period for fast testing
+    TryInterpret(0.01)
+    
+    -- Advance time to trigger the timer (which calls CheckFiles)
+    TriggerSleepAction(0.02)
+    
     local result1 = FileIO.Load("Interpreter\\out" .. fileIdx1 .. ".txt")
     Debug.assert(result1 == "first", "Expected 'first', got: " .. tostring(result1))
     
     -- Save second command
     local fileIdx2 = getNextFileIndex()
     FileIO.Save("Interpreter\\in" .. fileIdx2 .. ".txt", "return 'second'")
-    CheckFiles()
+    
+    -- Advance time again to trigger the timer for the second command
+    -- Note: After finding a command, CheckFiles reschedules with 0.1s period, so we need to wait at least that long
+    TriggerSleepAction(0.2)
+    
     local result2 = FileIO.Load("Interpreter\\out" .. fileIdx2 .. ".txt")
     Debug.assert(result2 == "second", "Expected 'second', got: " .. tostring(result2))
     

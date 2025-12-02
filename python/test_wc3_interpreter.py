@@ -11,8 +11,10 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch, MagicMock
 
 # Import the module under test
+import wc3_interpreter
 from wc3_interpreter import (
     load_file,
     create_file,
@@ -20,6 +22,7 @@ from wc3_interpreter import (
     find_lua_function,
     inject_into_function,
     modify_function,
+    send_file_to_game,
     REGEX_PATTERN,
     FILE_PREFIX,
     FILE_POSTFIX,
@@ -334,6 +337,165 @@ class TestFileFormat(unittest.TestCase):
         self.assertIn("Preload", LINE_PREFIX)
         self.assertIn("i([[", LINE_PREFIX)
         self.assertIn("]])", LINE_POSTFIX)
+
+
+class TestMainCommand(unittest.TestCase):
+    """Tests for the main() function and command handling."""
+
+    def test_main_handles_exit_command(self):
+        """Test that main() exits cleanly when 'exit' is entered."""
+        commands = iter(["exit"])
+        
+        def fake_input(prompt):
+            return next(commands)
+        
+        with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
+             patch.object(wc3_interpreter, 'remove_all_files'), \
+             patch.object(wc3_interpreter, 'stop_all_watchers'), \
+             patch.object(wc3_interpreter.signal, 'signal'):
+            # main() should exit without error
+            wc3_interpreter.main()
+
+    def test_main_handles_help_command(self):
+        """Test that main() handles the 'help' command."""
+        commands = iter(["help", "exit"])
+        output_lines = []
+        
+        def fake_input(prompt):
+            return next(commands)
+        
+        def fake_print(*args, **kwargs):
+            output_lines.append(' '.join(str(a) for a in args))
+        
+        with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
+             patch.object(wc3_interpreter, 'remove_all_files'), \
+             patch.object(wc3_interpreter, 'stop_all_watchers'), \
+             patch.object(wc3_interpreter.signal, 'signal'), \
+             patch('builtins.print', side_effect=fake_print):
+            wc3_interpreter.main()
+        
+        # Check that help output was printed
+        help_output = '\n'.join(output_lines)
+        self.assertIn("Available commands", help_output)
+        self.assertIn("file", help_output)
+
+    def test_main_handles_restart_command(self):
+        """Test that main() handles the 'restart' command."""
+        commands = iter(["restart", "exit"])
+        
+        def fake_input(prompt):
+            return next(commands)
+        
+        remove_all_files_called = []
+        stop_all_watchers_called = []
+        
+        def mock_remove_all_files():
+            remove_all_files_called.append(True)
+        
+        def mock_stop_all_watchers():
+            stop_all_watchers_called.append(True)
+        
+        with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
+             patch.object(wc3_interpreter, 'remove_all_files', side_effect=mock_remove_all_files), \
+             patch.object(wc3_interpreter, 'stop_all_watchers', side_effect=mock_stop_all_watchers), \
+             patch.object(wc3_interpreter.signal, 'signal'), \
+             patch('builtins.print'):
+            wc3_interpreter.main()
+        
+        # restart calls remove_all_files and stop_all_watchers, plus initial remove_all_files
+        # and exit also calls them
+        self.assertGreaterEqual(len(remove_all_files_called), 2)
+        self.assertGreaterEqual(len(stop_all_watchers_called), 1)
+
+    def test_main_handles_jump_command(self):
+        """Test that main() handles the 'jump' command."""
+        commands = iter(["jump 5", "exit"])
+        
+        def fake_input(prompt):
+            return next(commands)
+        
+        with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
+             patch.object(wc3_interpreter, 'remove_all_files'), \
+             patch.object(wc3_interpreter, 'stop_all_watchers'), \
+             patch.object(wc3_interpreter.signal, 'signal'), \
+             patch('builtins.print'):
+            wc3_interpreter.main()
+        
+        # After jump 5, nextFile should be 5
+        self.assertEqual(wc3_interpreter.nextFile, 5)
+
+
+class TestFileCommand(unittest.TestCase):
+    """Tests for the 'file' command and send_file_to_game function."""
+
+    def test_send_file_to_game_nonexistent_file(self):
+        """Test that send_file_to_game handles non-existent files gracefully."""
+        output_lines = []
+        
+        def fake_print(*args, **kwargs):
+            output_lines.append(' '.join(str(a) for a in args))
+        
+        with patch('builtins.print', side_effect=fake_print):
+            send_file_to_game("/nonexistent/path/to/file.lua")
+        
+        # Should print an error message
+        error_output = '\n'.join(output_lines)
+        self.assertIn("Error", error_output)
+        self.assertIn("does not exist", error_output)
+
+    def test_send_file_to_game_wraps_with_oninit(self):
+        """Test that send_file_to_game wraps file content with OnInit wrapper."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
+            f.write("print('hello')")
+            temp_path = f.name
+        
+        try:
+            sent_data = []
+            
+            def mock_send_data_to_game(data, print_prompt_after=False):
+                sent_data.append(data)
+            
+            with patch.object(wc3_interpreter, 'send_data_to_game', side_effect=mock_send_data_to_game), \
+                 patch('builtins.print'):
+                send_file_to_game(temp_path)
+            
+            # Check that the data was wrapped with OnInit wrapper
+            self.assertEqual(len(sent_data), 1)
+            self.assertIn(ONINIT_IMMEDIATE_WRAPPER, sent_data[0])
+            self.assertIn("print('hello')", sent_data[0])
+            self.assertIn(ONINIT_IMMEDIATE_WRAPPER_END, sent_data[0])
+        finally:
+            os.unlink(temp_path)
+
+    def test_main_handles_file_command(self):
+        """Test that main() handles the 'file' command."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
+            f.write("return 42")
+            temp_path = f.name
+        
+        try:
+            commands = iter([f"file {temp_path}", "exit"])
+            sent_files = []
+            
+            def fake_input(prompt):
+                return next(commands)
+            
+            def mock_send_file_to_game(filepath):
+                sent_files.append(filepath)
+            
+            with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
+                 patch.object(wc3_interpreter, 'remove_all_files'), \
+                 patch.object(wc3_interpreter, 'stop_all_watchers'), \
+                 patch.object(wc3_interpreter, 'send_file_to_game', side_effect=mock_send_file_to_game), \
+                 patch.object(wc3_interpreter.signal, 'signal'), \
+                 patch('builtins.print'):
+                wc3_interpreter.main()
+            
+            # Check that send_file_to_game was called with the correct path
+            self.assertEqual(len(sent_files), 1)
+            self.assertEqual(sent_files[0], temp_path)
+        finally:
+            os.unlink(temp_path)
 
 
 if __name__ == '__main__':
