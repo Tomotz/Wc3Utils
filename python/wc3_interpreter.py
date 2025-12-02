@@ -14,7 +14,13 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # You might need to change `D:` to your Warcraft III installation drive
-CUSTOM_MAP_DATA_PATH = r"D:\Users\{username}\Documents\Warcraft III\CustomMapData\\".format(username=os.getlogin())
+def _get_username():
+    try:
+        return os.getlogin()
+    except OSError:
+        return os.environ.get('USER', os.environ.get('USERNAME', 'User'))
+
+CUSTOM_MAP_DATA_PATH = r"D:\Users\{username}\Documents\Warcraft III\CustomMapData\\".format(username=_get_username())
 FILES_ROOT = CUSTOM_MAP_DATA_PATH + "Interpreter" + "\\" # This should match the folder defined in the lua code
 
 # find any pattern starting with `call Preload( "]]i([[` and ending with `]])--[[" )` and concatenate the innter strings
