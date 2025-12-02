@@ -10,8 +10,18 @@ import sys
 import traceback
 import threading
 from typing import Optional
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+
+# Optional watchdog import for file watching functionality
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    WATCHDOG_AVAILABLE = True
+except ImportError:
+    Observer = None
+    class FileSystemEventHandler:
+        """Fallback base class when watchdog is not installed."""
+        pass
+    WATCHDOG_AVAILABLE = False
 
 # You might need to change `D:` to your Warcraft III installation drive
 def _get_username():
@@ -99,6 +109,10 @@ def wrap_with_oninit_immediate(content: str) -> str:
 
 def start_watching(filepath: str, send_callback) -> bool:
     """Start watching a file for changes. Returns True if successful."""
+    if not WATCHDOG_AVAILABLE:
+        print("watch: watchdog is not installed. Install it with `pip install watchdog` to use watch/unwatch.")
+        return False
+    
     filepath = os.path.abspath(filepath)
     
     if not os.path.exists(filepath):
@@ -281,11 +295,28 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 nextFile = 0
+send_lock = threading.Lock()  # Thread safety for nextFile and file I/O
+
+def send_data_to_game(data: str):
+    """Send data to the game and wait for response. Thread-safe."""
+    global nextFile
+    if data == "":
+        return
+    with send_lock:
+        create_file(FILES_ROOT + f"in{nextFile}.txt", data)
+        while not os.path.exists(FILES_ROOT + f"out{nextFile}.txt"):
+            time.sleep(0.1)
+        try:
+            result = load_file(FILES_ROOT + f"out{nextFile}.txt")
+            if result != b"nil" and result != "nil":
+                print(result)
+        except Exception as e:
+            print("failed. Got exception: ", e)
+            traceback.print_exc()
+        nextFile += 1
 
 def send_file_to_game(filepath: str):
     """Send a file to the game with OnInit wrapper applied. Used by both 'file' command and watch callbacks."""
-    global nextFile
-    
     if not os.path.exists(filepath):
         print(f"Error: File does not exist: {filepath}")
         return
@@ -296,22 +327,8 @@ def send_file_to_game(filepath: str):
     # Wrap with OnInit immediate execution wrapper
     data = wrap_with_oninit_immediate(data)
     
-    print(f"Sending file {filepath} to game as in{nextFile}.txt")
-    create_file(FILES_ROOT + f"in{nextFile}.txt", data)
-    
-    # Wait for response
-    while not os.path.exists(FILES_ROOT + f"out{nextFile}.txt"):
-        time.sleep(0.1)
-    
-    try:
-        result = load_file(FILES_ROOT + f"out{nextFile}.txt")
-        if result != b"nil" and result != "nil":
-            print(result)
-    except Exception as e:
-        print("failed. Got exception: ", e)
-        traceback.print_exc()
-    
-    nextFile += 1
+    print(f"Sending file {filepath} to game")
+    send_data_to_game(data)
 
 def main():
     global nextFile
@@ -378,17 +395,7 @@ def main():
             data = command
         if data == "":
             continue
-        create_file(FILES_ROOT + f"in{nextFile}.txt", data)
-        while not os.path.exists(FILES_ROOT + f"out{nextFile}.txt"):
-            time.sleep(0.1)
-        try:
-            result = load_file(FILES_ROOT + f"out{nextFile}.txt")
-            if result != b"nil" and result != "nil":
-                print(result)
-        except Exception as e:
-            print("failed. Got exception: ", e)
-            traceback.print_exc()
-        nextFile += 1
+        send_data_to_game(data)
 
 if __name__ == "__main__":
     main()
