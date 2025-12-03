@@ -115,16 +115,21 @@ end
 -- ============================================================================
 -- Breakpoints use per-coroutine data files and a shared metadata file:
 -- - bp_threads.txt: Lists all thread IDs currently in a breakpoint (one per line)
--- - bp_data_<thread_id>.txt: Contains breakpoint data for each thread:
---     bp_id:<breakpoint_id>
---     locals:<comma-separated list of local variable names>
---     stack:<stacktrace>
---     <serialized local variable values as key=value pairs>
--- - bp_in.txt: Input commands with format "thread_id:cmd_index:command"
+-- - bp_data_<thread_id>.txt: Contains breakpoint data for each thread using \x1F (unit separator) as field separator:
+--     bp_id\x1F<breakpoint_id>
+--     stack\x1F<stacktrace with \n escaped as \\n>
+--     <var_name>\x1F<var_value> (one per local variable)
+-- - bp_in{N}.txt: Input commands (incrementing files due to WC3 file caching)
+--     Format: "thread_id:cmd_index:command"
 -- - bp_out.txt: Output results with format "thread_id:cmd_index\nresult"
+
+-- Field separator for breakpoint data files (ASCII 31 = unit separator)
+-- This character is unlikely to appear in variable names/values
+local FIELD_SEP = string.char(31)
 
 local activeBreakpointThreads = {} ---@type table<string, boolean> -- Maps thread_id to true if in breakpoint
 local bpCommandIndex = {} ---@type table<string, integer> -- Maps thread_id to next expected command index
+local nextBpFile = 0 -- Global index for breakpoint input files (due to WC3 file caching)
 
 --- Get a unique identifier for the current coroutine
 ---@return string
@@ -151,30 +156,26 @@ local function updateBreakpointThreadsFile()
 end
 
 --- Write breakpoint data file for a specific thread
+--- Uses FIELD_SEP (ASCII 31) as field separator to avoid conflicts with variable values
 ---@param threadId string
 ---@param breakpointId string|integer
 ---@param localVariables table<string, any>?
 local function writeBreakpointDataFile(threadId, breakpointId, localVariables)
     local lines = {}
-    table.insert(lines, "bp_id:" .. tostring(breakpointId))
+    -- Format: key<FIELD_SEP>value per line
+    table.insert(lines, "bp_id" .. FIELD_SEP .. tostring(breakpointId))
     
-    -- Add local variable names
-    local varNames = {}
-    if localVariables then
-        for k, _ in pairs(localVariables) do
-            table.insert(varNames, k)
-        end
+    -- Add stacktrace (use Debug.traceback for WC3 compatibility)
+    local stack = ""
+    if Debug and Debug.traceback then
+        stack = Debug.traceback("", 3) or ""
     end
-    table.insert(lines, "locals:" .. table.concat(varNames, ","))
+    table.insert(lines, "stack" .. FIELD_SEP .. stack:gsub("\n", "\\n"))
     
-    -- Add stacktrace
-    local stack = debug.traceback("", 3) or ""
-    table.insert(lines, "stack:" .. stack:gsub("\n", "\\n"))
-    
-    -- Add local variable values
+    -- Add local variable values (names are derived from keys)
     if localVariables then
         for k, v in pairs(localVariables) do
-            table.insert(lines, k .. "=" .. formatOutput(v))
+            table.insert(lines, k .. FIELD_SEP .. formatOutput(v))
         end
     end
     
@@ -231,12 +232,17 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
     updateBreakpointThreadsFile()
 
     -- Main breakpoint loop - wait for commands
+    -- Uses incrementing bp_in{N}.txt files due to WC3 file caching (can't read same file twice)
     while true do
-        -- Check for commands in bp_in.txt
-        local inputContent = FileIO.Load(FILES_ROOT .. "\\bp_in.txt")
+        -- Check for commands in bp_in{nextBpFile}.txt
+        local inputContent = FileIO.Load(FILES_ROOT .. "\\bp_in" .. nextBpFile .. ".txt")
         if inputContent ~= nil then
             -- Parse format: "thread_id:cmd_index:command"
             local targetThread, cmdIndexStr, command = inputContent:match("^([^:]+):(%d+):(.*)$")
+            
+            -- Increment file index immediately after reading (file can only be read once)
+            nextBpFile = nextBpFile + 1
+            
             if targetThread == threadId then
                 local cmdIndex = tonumber(cmdIndexStr) or 0
                 local expectedIndex = bpCommandIndex[threadId]

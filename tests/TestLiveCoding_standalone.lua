@@ -417,8 +417,19 @@ local function getBreakpointThreads()
     return threads
 end
 
+-- Field separator for breakpoint data files (ASCII 31 = unit separator)
+-- Must match FIELD_SEP in LiveCoding.lua
+local FIELD_SEP = string.char(31)
+
+-- Track breakpoint input file index (matches nextBpFile in LiveCoding.lua)
+local nextBpInputFile = 0
+
 -- Helper to get breakpoint data for a specific thread
--- Returns a table with bp_id, locals (list), stack, and locals_values (table)
+-- Returns a table with bp_id, locals (list derived from locals_values keys), stack, and locals_values (table)
+-- File format uses FIELD_SEP (ASCII 31) as separator:
+--   bp_id<SEP>value
+--   stack<SEP>value (with \n escaped as \\n)
+--   var_name<SEP>var_value (one per local variable)
 local function getBreakpointData(threadId)
     local content = FileIO.Load("Interpreter\\bp_data_" .. threadId .. ".txt")
     if not content then
@@ -426,24 +437,22 @@ local function getBreakpointData(threadId)
     end
     local data = {locals_values = {}}
     for line in content:gmatch("[^\n]+") do
-        if line:match("^bp_id:") then
-            data.bp_id = line:sub(7)
-        elseif line:match("^locals:") then
-            local localsStr = line:sub(8)
-            data.locals = {}
-            if localsStr ~= "" then
-                for var in localsStr:gmatch("[^,]+") do
-                    table.insert(data.locals, var)
-                end
-            end
-        elseif line:match("^stack:") then
-            data.stack = line:sub(7):gsub("\\n", "\n")
-        elseif line:match("=") then
-            local key, value = line:match("^([^=]+)=(.*)$")
-            if key then
+        if line:find(FIELD_SEP) then
+            local key, value = line:match("^([^" .. FIELD_SEP .. "]+)" .. FIELD_SEP .. "(.*)$")
+            if key == "bp_id" then
+                data.bp_id = value
+            elseif key == "stack" then
+                data.stack = value:gsub("\\n", "\n")
+            elseif key then
+                -- Local variable value
                 data.locals_values[key] = value
             end
         end
+    end
+    -- Derive locals list from locals_values keys
+    data.locals = {}
+    for k, _ in pairs(data.locals_values) do
+        table.insert(data.locals, k)
     end
     return data
 end
@@ -509,7 +518,9 @@ function test_Breakpoint_shows_local_variables()
         "myString should be 'hello', got: " .. tostring(bpData.locals_values["myString"]))
     
     -- Send continue command to resume execution using new format: thread_id:cmd_index:command
-    FileIO.Save("Interpreter\\bp_in.txt", threadId .. ":0:continue")
+    -- Uses incrementing bp_in{N}.txt files due to WC3 file caching
+    FileIO.Save("Interpreter\\bp_in" .. nextBpInputFile .. ".txt", threadId .. ":0:continue")
+    nextBpInputFile = nextBpInputFile + 1
     
     -- Advance time to let the breakpoint process the continue command
     TriggerSleepAction(0.6)
@@ -552,7 +563,9 @@ function test_Breakpoint_output_format_without_locals()
         "Output should have empty locals list when none provided")
     
     -- Send continue command to clean up using new format
-    FileIO.Save("Interpreter\\bp_in.txt", threadId .. ":0:continue")
+    -- Uses incrementing bp_in{N}.txt files due to WC3 file caching
+    FileIO.Save("Interpreter\\bp_in" .. nextBpInputFile .. ".txt", threadId .. ":0:continue")
+    nextBpInputFile = nextBpInputFile + 1
     TriggerSleepAction(0.6)
     processTimersAndCoroutines()
     

@@ -103,6 +103,10 @@ bp_monitor_stop_event = threading.Event()  # Event to signal thread to stop
 in_breakpoint_mode = False  # Flag to indicate if we're in breakpoint mode
 current_bp_thread_id = None  # Current breakpoint thread ID being interacted with
 bp_command_indices = {}  # Maps thread_id to next command index
+nextBpFile = 0  # Global index for breakpoint input files (matches Lua side)
+
+# Field separator for breakpoint data files (ASCII 31 = unit separator)
+FIELD_SEP = chr(31)
 
 class FileChangeHandler(FileSystemEventHandler):
     """Handler for file change events that sends the file to the game"""
@@ -348,7 +352,13 @@ def get_breakpoint_threads() -> list:
 def get_breakpoint_info(thread_id: str) -> dict:
     """Get breakpoint info for a specific thread by reading bp_data_<thread_id>.txt.
     
-    Returns a dict with keys: bp_id, locals, stack, and any local variable values.
+    File format uses FIELD_SEP (ASCII 31) as separator:
+    - bp_id<SEP>value
+    - stack<SEP>value (with \\n for newlines)
+    - var_name<SEP>var_value (one per local variable)
+    
+    Returns a dict with keys: bp_id, stack, locals_values (dict of name->value).
+    The 'locals' list is derived from locals_values keys.
     """
     bp_data_file = FILES_ROOT + f"bp_data_{thread_id}.txt"
     if not os.path.exists(bp_data_file):
@@ -362,17 +372,19 @@ def get_breakpoint_info(thread_id: str) -> dict:
     
     info = {'thread_id': thread_id, 'locals_values': {}}
     for line in content_str.split('\n'):
-        if line.startswith('bp_id:'):
-            info['bp_id'] = line[6:]
-        elif line.startswith('locals:'):
-            info['locals'] = line[7:].split(',') if line[7:] else []
-        elif line.startswith('stack:'):
-            # Unescape newlines in stacktrace
-            info['stack'] = line[6:].replace('\\n', '\n')
-        elif '=' in line:
-            # Local variable value
-            key, value = line.split('=', 1)
-            info['locals_values'][key] = value
+        if FIELD_SEP in line:
+            key, value = line.split(FIELD_SEP, 1)
+            if key == 'bp_id':
+                info['bp_id'] = value
+            elif key == 'stack':
+                # Unescape newlines in stacktrace
+                info['stack'] = value.replace('\\n', '\n')
+            else:
+                # Local variable value
+                info['locals_values'][key] = value
+    
+    # Derive locals list from locals_values keys
+    info['locals'] = list(info['locals_values'].keys())
     return info
 
 
@@ -421,19 +433,21 @@ def bp_show_info(thread_id: str):
 def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
     """Send a command to a specific breakpoint thread and wait for response.
     
-    Format: thread_id:cmd_index:command -> bp_in.txt
+    Uses incrementing bp_in{N}.txt files due to WC3 file caching.
+    Format: thread_id:cmd_index:command -> bp_in{N}.txt
     Response: thread_id:cmd_index\\nresult <- bp_out.txt
     """
-    global bp_command_indices
+    global bp_command_indices, nextBpFile
     
     if thread_id not in bp_command_indices:
         bp_command_indices[thread_id] = 0
     
     cmd_index = bp_command_indices[thread_id]
     
-    # Write command to bp_in.txt
+    # Write command to bp_in{nextBpFile}.txt (incrementing files due to WC3 caching)
     cmd_content = f"{thread_id}:{cmd_index}:{command}"
-    create_file(FILES_ROOT + "bp_in.txt", cmd_content)
+    create_file(FILES_ROOT + f"bp_in{nextBpFile}.txt", cmd_content)
+    nextBpFile += 1
     
     # Wait for response in bp_out.txt
     expected_prefix = f"{thread_id}:{cmd_index}"
@@ -491,7 +505,16 @@ def stop_breakpoint_monitor():
 
 
 def handle_breakpoint_mode(thread_id: str, info: dict):
-    """Handle breakpoint mode - allows user to interact with a specific breakpoint thread."""
+    """Handle breakpoint mode - GDB-like interface for interacting with breakpoints.
+    
+    Commands available in breakpoint mode:
+    - list: List all threads currently in a breakpoint (marks current with *)
+    - thread <id>: Switch to a different breakpoint thread
+    - info: Show detailed info for current thread
+    - continue: Resume execution of current thread and exit breakpoint mode
+    - help: Show available commands
+    - <lua code>: Execute Lua code in the breakpoint environment
+    """
     global in_breakpoint_mode, current_bp_thread_id
     in_breakpoint_mode = True
     current_bp_thread_id = thread_id
@@ -504,12 +527,14 @@ def handle_breakpoint_mode(thread_id: str, info: dict):
     print(f"Thread: {thread_id}")
     if locals_list:
         print(f"Local variables: {', '.join(locals_list)}")
-    print("Type 'continue' to resume, 'info' for details, or run Lua commands")
+    print("Type 'help' for commands, 'continue' to resume, or enter Lua code")
     print("=" * 60)
     
     while True:
         try:
-            command = input(f"bp:{thread_id[:8]}... >>> ")
+            # Show short thread ID in prompt
+            short_id = current_bp_thread_id[:8] if len(current_bp_thread_id) > 8 else current_bp_thread_id
+            command = input(f"bp:{short_id}... >>> ")
         except EOFError:
             break
         
@@ -517,19 +542,67 @@ def handle_breakpoint_mode(thread_id: str, info: dict):
         if cmd == "":
             continue
         
+        if cmd == "help":
+            print("Breakpoint mode commands:")
+            print("  list      - List all threads in breakpoint (current marked with *)")
+            print("  thread <id> - Switch to a different breakpoint thread")
+            print("  info      - Show detailed info for current thread")
+            print("  continue  - Resume execution and exit breakpoint mode")
+            print("  help      - Show this help message")
+            print("  <lua>     - Execute Lua code in the breakpoint environment")
+            continue
+        
+        if cmd == "list":
+            threads = get_breakpoint_threads()
+            if not threads:
+                print("No threads currently in a breakpoint.")
+            else:
+                print(f"Threads in breakpoint ({len(threads)}):")
+                for tid in threads:
+                    bp_info = get_breakpoint_info(tid)
+                    bp_name = bp_info.get('bp_id', 'unknown') if bp_info else 'unknown'
+                    marker = " *" if tid == current_bp_thread_id else ""
+                    print(f"  {tid}: breakpoint '{bp_name}'{marker}")
+            continue
+        
+        if cmd.startswith("thread "):
+            new_thread_id = cmd[7:].strip()
+            threads = get_breakpoint_threads()
+            if new_thread_id in threads:
+                current_bp_thread_id = new_thread_id
+                new_info = get_breakpoint_info(new_thread_id)
+                if new_info:
+                    print(f"Switched to thread {new_thread_id}")
+                    print(f"Breakpoint: {new_info.get('bp_id', 'unknown')}")
+                    new_locals = new_info.get('locals', [])
+                    if new_locals:
+                        print(f"Local variables: {', '.join(new_locals)}")
+                else:
+                    print(f"Switched to thread {new_thread_id} (no info available)")
+            else:
+                print(f"Thread '{new_thread_id}' not found in breakpoint.")
+                print(f"Available threads: {', '.join(threads) if threads else 'none'}")
+            continue
+        
         if cmd == "info":
-            bp_show_info(thread_id)
+            bp_show_info(current_bp_thread_id)
             continue
         
         if cmd == "continue":
-            response = send_breakpoint_command(thread_id, "continue")
-            print("Resuming execution...")
+            response = send_breakpoint_command(current_bp_thread_id, "continue")
+            print(f"Resuming thread {current_bp_thread_id}...")
+            # Check if there are other threads still in breakpoint
+            threads = get_breakpoint_threads()
+            remaining = [t for t in threads if t != current_bp_thread_id]
+            if remaining:
+                print(f"Note: {len(remaining)} other thread(s) still in breakpoint.")
+                print("Use 'bp list' to see them, or they will trigger breakpoint mode when detected.")
             in_breakpoint_mode = False
             current_bp_thread_id = None
             return
         
-        # Send command to game
-        response = send_breakpoint_command(thread_id, cmd)
+        # Send Lua command to game
+        response = send_breakpoint_command(current_bp_thread_id, cmd)
         if response is not None:
             print(response)
         else:
@@ -610,7 +683,7 @@ def send_file_to_game(filepath: str):
     send_data_to_game(data, print_prompt_after=True)
 
 def main():
-    global nextFile, bp_command_indices
+    global nextFile, bp_command_indices, nextBpFile
     remove_all_files()
     # add a signal handler that handles all signals by removing all files and calling the default handler
 
@@ -656,13 +729,12 @@ def main():
             print("  watching - list all files currently being watched")
             print("  bp list - list all threads currently in a breakpoint")
             print("  bp info <thread_id> - show detailed info for a breakpoint thread")
-            print("  bp <thread_id> <command> - send a command to a specific breakpoint thread")
             print("  <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.")
             print("** Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **")
             print("** Note: OnInit calls in files sent via 'file' or 'watch' are automatically executed immediately **")
             print("\nBreakpoint support:")
             print("  When a Breakpoint() is hit in your Lua code, the interpreter will enter breakpoint mode.")
-            print("  In breakpoint mode, you can inspect/modify variables and type 'continue' to resume.")
+            print("  In breakpoint mode, type 'help' for available commands (list, thread, info, continue).")
             print("  You can also query breakpoint data without entering breakpoint mode using 'bp list' and 'bp info'.")
             continue
         elif command == "restart":
@@ -670,6 +742,7 @@ def main():
             stop_all_watchers()
             remove_all_files()
             nextFile = 0
+            nextBpFile = 0
             bp_command_indices = {}
             start_breakpoint_monitor()
             print("State reset. You can start a new game now.")
@@ -698,19 +771,6 @@ def main():
         elif command.startswith("bp info "):
             thread_id = command[8:].strip()
             bp_show_info(thread_id)
-            continue
-        elif command.startswith("bp "):
-            # bp <thread_id> <command>
-            parts = command[3:].strip().split(' ', 1)
-            if len(parts) == 2:
-                thread_id, bp_cmd = parts
-                response = send_breakpoint_command(thread_id, bp_cmd)
-                if response is not None:
-                    print(response)
-                else:
-                    print("(no response or timeout)")
-            else:
-                print("Usage: bp <thread_id> <command>")
             continue
         else:
             data = command
