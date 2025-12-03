@@ -287,24 +287,40 @@ def load_file(filename: str) -> Optional[bytes]:
         return None
     with open(filename, 'rb') as file:
         data = file.read()
+    # First try the i([[ ... ]])--[[ pattern used by create_file/FileIO
+    matches = re.findall(REGEX_PATTERN, data, flags=re.DOTALL)
+    if matches:
+        return b''.join(matches)
+    # Fallback to simpler pattern for legacy/simple format
     matches = re.findall(READ_REGEX_PATTERN, data, flags=re.DOTALL)
     if matches:
         return b''.join(matches)
     return b''
 
-def create_file(filename: str, content: str) -> None:
+def create_file(filename: str, content) -> None:
     """
     creates a file in wc3 preload format (that can be loaded by FileIO)
-    @content: The data that will be returned from FileIO after loading this file
+    @content: The data that will be returned from FileIO after loading this file.
+              Accepts both str and bytes.
     """
     assert len(content) > 0
-    data = FILE_PREFIX
-    # Split content into 255 char chunks
-    for i in range(0, len(content), 255):
-        chunk = content[i : i+255]
-        data += LINE_PREFIX + chunk + LINE_POSTFIX
-    data += FILE_POSTFIX
-    with open(filename, 'w', encoding='utf-8') as file:
+    # Convert to bytes if needed for internal processing
+    if isinstance(content, str):
+        content_bytes = content.encode('utf-8')
+    else:
+        content_bytes = content
+    
+    # Build the file content as bytes
+    data = FILE_PREFIX.encode('utf-8')
+    line_prefix_bytes = LINE_PREFIX.encode('utf-8')
+    line_postfix_bytes = LINE_POSTFIX.encode('utf-8')
+    
+    # Split content into 255 byte chunks
+    for i in range(0, len(content_bytes), 255):
+        chunk = content_bytes[i : i+255]
+        data += line_prefix_bytes + chunk + line_postfix_bytes
+    data += FILE_POSTFIX.encode('utf-8')
+    with open(filename, 'wb') as file:
         file.write(data)
 
 def remove_all_files() -> None:
