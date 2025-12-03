@@ -44,7 +44,7 @@ REGEX_PATTERN = rb'call Preload\( "\]\]i\(\[\[(.*?)\]\]\)--\[\[" \)'
 # find any pattern starting with `call Preload( "` and ending with `" )` and concatenate the innter strings
 READ_REGEX_PATTERN = rb'call Preload\( "(.*?)" \)'
 
-FILE_PREFIX = b"""function PreloadFiles takes nothing returns nothing
+FILE_PREFIX = """function PreloadFiles takes nothing returns nothing
 
 	call PreloadStart()
 	call Preload( "")
@@ -53,7 +53,7 @@ endfunction
 local p={} local i=function(s) table.insert(p,s) end--[[" )
 	"""
 
-FILE_POSTFIX = b"""\n	call Preload( "]]BlzSetAbilityTooltip(1095656547, table.concat(p), 0)
+FILE_POSTFIX = """\n	call Preload( "]]BlzSetAbilityTooltip(1095656547, table.concat(p), 0)
 //!endusercode
 function a takes nothing returns nothing
 //" )
@@ -63,13 +63,13 @@ endfunction
 
 """
 
-LINE_PREFIX = b'\n\tcall Preload( "]]i([['
-LINE_POSTFIX = b']])--[[" )'
+LINE_PREFIX = '\n	call Preload( "]]i([['
+LINE_POSTFIX = ']])--[[" )'
 
 # Lua wrapper to make OnInit and its submethods execute immediately instead of registering for later
 # This is needed because when running code via the interpreter, the OnInit phase has already passed
 # The wrapper also captures and returns the result of the file's return statement
-ONINIT_IMMEDIATE_WRAPPER = b"""do
+ONINIT_IMMEDIATE_WRAPPER = """do
 local function _immediateExec(nameOrFunc, func)
     local f = func or nameOrFunc
     if type(f) == 'function' then f() end
@@ -85,7 +85,7 @@ local function __wc3_interpreter_run()
     __wc3_interpreter_result = (function()
 """
 
-ONINIT_IMMEDIATE_WRAPPER_END = b"""
+ONINIT_IMMEDIATE_WRAPPER_END = """
     end)()
 end
 
@@ -135,7 +135,7 @@ class FileChangeHandler(FileSystemEventHandler):
             print(f"\n[watch] File changed: {self.filepath}")
             self.send_callback(self.filepath)
 
-def wrap_with_oninit_immediate(content: bytes) -> bytes:
+def wrap_with_oninit_immediate(content: str) -> str:
     """Wraps Lua content with OnInit immediate execution wrapper"""
     return ONINIT_IMMEDIATE_WRAPPER + content + ONINIT_IMMEDIATE_WRAPPER_END
 
@@ -287,23 +287,39 @@ def load_file(filename: str) -> Optional[bytes]:
         return None
     with open(filename, 'rb') as file:
         data = file.read()
+    # First try the i([[ ... ]])--[[ pattern used by create_file/FileIO
+    matches = re.findall(REGEX_PATTERN, data, flags=re.DOTALL)
+    if matches:
+        return b''.join(matches)
+    # Fallback to simpler pattern for legacy/simple format
     matches = re.findall(READ_REGEX_PATTERN, data, flags=re.DOTALL)
     if matches:
         return b''.join(matches)
     return b''
 
-def create_file(filename: str, content: bytes) -> None:
+def create_file(filename: str, content) -> None:
     """
     creates a file in wc3 preload format (that can be loaded by FileIO)
-    @content: The data that will be returned from FileIO after loading this file
+    @content: The data that will be returned from FileIO after loading this file.
+              Accepts both str and bytes.
     """
     assert len(content) > 0
-    data = FILE_PREFIX
+    # Convert to bytes if needed for internal processing
+    if isinstance(content, str):
+        content_bytes = content.encode('utf-8')
+    else:
+        content_bytes = content
+    
+    # Build the file content as bytes
+    data = FILE_PREFIX.encode('utf-8')
+    line_prefix_bytes = LINE_PREFIX.encode('utf-8')
+    line_postfix_bytes = LINE_POSTFIX.encode('utf-8')
+    
     # Split content into 255 byte chunks
-    for i in range(0, len(content), 255):
-        chunk = content[i : i+255]
-        data += LINE_PREFIX + chunk + LINE_POSTFIX
-    data += FILE_POSTFIX
+    for i in range(0, len(content_bytes), 255):
+        chunk = content_bytes[i : i+255]
+        data += line_prefix_bytes + chunk + line_postfix_bytes
+    data += FILE_POSTFIX.encode('utf-8')
     with open(filename, 'wb') as file:
         file.write(data)
 
@@ -354,7 +370,7 @@ def get_breakpoint_threads() -> List[bytes]:
     return [t.strip() for t in content.strip().split(b'\n') if t.strip()]
 
 
-def get_breakpoint_info(thread_id: bytes) -> Optional[Dict[bytes, any]]:
+def get_breakpoint_info(thread_id: str) -> Optional[Dict[str, any]]:
     """Get breakpoint info for a specific thread by reading bp_data_<thread_id>.txt.
 
     File format is a single FIELD_SEP-separated record:
@@ -368,35 +384,36 @@ def get_breakpoint_info(thread_id: bytes) -> Optional[Dict[bytes, any]]:
     Returns a dict with keys: bp_id, stack, locals_values (dict of name->value).
     The 'locals' list is derived from locals_values keys.
     """
-    bp_data_file = os.path.join(FILES_ROOT, "bp_data_" + thread_id.decode('utf-8', errors='replace') + ".txt")
+    bp_data_file = os.path.join(FILES_ROOT, f"bp_data_{thread_id}.txt")
     if not os.path.exists(bp_data_file):
         return None
     content = load_file(bp_data_file)
     if not content:
         return None
-    text = content.strip()
+    content_str = content
+    text = content_str.strip()
     if not text:
         return None
 
     # Split by FIELD_SEP and parse in pairs
     parts = text.split(FIELD_SEP)
-    info = {b'thread_id': thread_id, b'locals_values': {}}
+    info = {'thread_id': thread_id, 'locals_values': {}}
 
     i = 0
     while i + 1 < len(parts):
         key, value = parts[i], parts[i + 1]
         i += 2
         if key == b'bp_id':
-            info[b'bp_id'] = value
+            info['bp_id'] = value
         elif key == b'stack':
             # Unescape newlines in stacktrace
-            info[b'stack'] = value
+            info['stack'] = value
         else:
             # Local variable value
-            info[b'locals_values'][key] = value
+            info['locals_values'][key] = value
 
     # Derive locals list from locals_values keys
-    info[b'locals'] = list(info[b'locals_values'].keys())
+    info['locals'] = list(info['locals_values'].keys())
     return info
 
 
@@ -408,41 +425,41 @@ def bp_list_threads() -> None:
         return
     print(f"Threads in breakpoint ({len(threads)}):")
     for thread_id in threads:
-        info = get_breakpoint_info(thread_id)
+        info = get_breakpoint_info(thread_id.decode('utf-8', errors='replace'))
         if info:
-            bp_id = info.get(b'bp_id', b'unknown')
-            print(f"  {thread_id.decode('utf-8', errors='replace')}: breakpoint '{bp_id.decode('utf-8', errors='replace')}'")
+            bp_id = info.get('bp_id', 'unknown')
+            print(f"  {thread_id}: breakpoint '{bp_id}'")
         else:
-            print(f"  {thread_id.decode('utf-8', errors='replace')}: (no info available)")
+            print(f"  {thread_id}: (no info available)")
 
 
-def bp_show_info(thread_id: bytes):
+def bp_show_info(thread_id: str):
     """Show detailed breakpoint info for a specific thread."""
     info = get_breakpoint_info(thread_id)
     if not info:
-        print(f"No breakpoint info found for thread '{thread_id.decode('utf-8', errors='replace')}'")
+        print(f"No breakpoint info found for thread '{thread_id}'")
         return
 
-    print(f"Thread: {thread_id.decode('utf-8', errors='replace')}")
-    print(f"Breakpoint ID: {info.get(b'bp_id', b'unknown').decode('utf-8', errors='replace')}")
+    print(f"Thread: {thread_id}")
+    print(f"Breakpoint ID: {info.get('bp_id', 'unknown')}")
 
-    locals_list = info.get(b'locals', [])
+    locals_list = info.get('locals', [])
     if locals_list:
-        print(f"Local variables: {b', '.join(locals_list).decode('utf-8', errors='replace')}")
+        print(f"Local variables: {b', '.join(locals_list)}")
         for var in locals_list:
-            if var in info.get(b'locals_values', {}):
-                print(f"  {var.decode('utf-8', errors='replace')} = {info[b'locals_values'][var].decode('utf-8', errors='replace')}")
+            if var in info.get('locals_values', {}):
+                print(f"  {var} = {info['locals_values'][var]}")
 
-    stack = info.get(b'stack', b'')
+    stack = info.get('stack', '')
     if stack:
-        print(f"Stack trace:\n{stack.decode('utf-8', errors='replace')}")
+        print(f"Stack trace:\n{stack}")
 
 
 # ============================================================================
 # Breakpoint Command Functions (interact with game)
 # ============================================================================
 
-def send_breakpoint_command(thread_id: bytes, command: bytes) -> Optional[bytes]:
+def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
     """Send a command to a specific breakpoint thread and wait for response.
 
     Uses per-thread incrementing bp_in_<thread_id>_<idx>.txt files due to WC3 file caching.
@@ -458,12 +475,11 @@ def send_breakpoint_command(thread_id: bytes, command: bytes) -> Optional[bytes]
 
     # Write command to bp_in_<thread_id>_<cmd_index>.txt
     # File content is just the raw command (thread_id is in filename)
-    thread_id_str = thread_id.decode('utf-8', errors='replace')
-    filename = os.path.join(FILES_ROOT, f"bp_in_{thread_id_str}_{cmd_index}.txt")
+    filename = os.path.join(FILES_ROOT, f"bp_in_{thread_id}_{cmd_index}.txt")
     create_file(filename, command)
 
     # Wait for response in bp_out.txt
-    expected_prefix = thread_id + b':' + str(cmd_index).encode('utf-8')
+    expected_prefix = f"{thread_id}:{cmd_index}"
     start_time = time.time()
     timeout = 30.0
 
@@ -475,7 +491,7 @@ def send_breakpoint_command(thread_id: bytes, command: bytes) -> Optional[bytes]
                 index, result = parse_indexed_output(content)
                 if index == expected_prefix:
                     bp_command_indices[thread_id] = cmd_index + 1
-                    return result if result else None
+                    return result.decode('utf-8', errors='replace') if result else None
         time.sleep(0.1)
 
     return None
@@ -489,9 +505,9 @@ def breakpoint_monitor_thread() -> None:
         new_threads = current_threads - known_threads
 
         for thread_id in new_threads:
-            info = get_breakpoint_info(thread_id)
+            info = get_breakpoint_info(thread_id.decode('utf-8', errors='replace'))
             if info:
-                breakpoint_queue.put((thread_id, info))
+                breakpoint_queue.put((thread_id.decode('utf-8', errors='replace'), info))
 
         known_threads = current_threads
         time.sleep(0.2)  # Check every 200ms
@@ -516,7 +532,7 @@ def stop_breakpoint_monitor() -> None:
         bp_monitor_thread = None
 
 
-def handle_breakpoint_mode(thread_id: bytes, info: Dict[bytes, any]) -> None:
+def handle_breakpoint_mode(thread_id: str, info: Dict[str, any]) -> None:
     """Handle breakpoint mode - GDB-like interface for interacting with breakpoints.
 
     Commands available in breakpoint mode:
@@ -531,14 +547,14 @@ def handle_breakpoint_mode(thread_id: bytes, info: Dict[bytes, any]) -> None:
     in_breakpoint_mode = True
     current_bp_thread_id = thread_id
 
-    bp_id = info.get(b'bp_id', b'unknown')
-    locals_list = info.get(b'locals', [])
+    bp_id = info.get('bp_id', 'unknown')
+    locals_list = info.get('locals', [])
 
     print("\n" + "=" * 60)
-    print(f"BREAKPOINT HIT: {bp_id.decode('utf-8', errors='replace')}")
-    print(f"Thread: {thread_id.decode('utf-8', errors='replace')}")
+    print(f"BREAKPOINT HIT: {bp_id}")
+    print(f"Thread: {thread_id}")
     if locals_list:
-        print(f"Local variables: {b', '.join(locals_list).decode('utf-8', errors='replace')}")
+        print(f"Local variables: {b', '.join(locals_list)}")
     print("Type 'help' for commands, 'continue' to resume, or enter Lua code")
     print("=" * 60)
 
@@ -546,7 +562,7 @@ def handle_breakpoint_mode(thread_id: bytes, info: Dict[bytes, any]) -> None:
         try:
             # Show short thread ID in prompt
             short_id = current_bp_thread_id[:8] if len(current_bp_thread_id) > 8 else current_bp_thread_id
-            command = input(f"bp:{short_id.decode('utf-8', errors='replace')}... >>> ")
+            command = input(f"bp:{short_id}... >>> ")
         except EOFError:
             break
 
@@ -571,29 +587,30 @@ def handle_breakpoint_mode(thread_id: bytes, info: Dict[bytes, any]) -> None:
             else:
                 print(f"Threads in breakpoint ({len(threads)}):")
                 for tid in threads:
-                    bp_info = get_breakpoint_info(tid)
-                    bp_name = bp_info.get(b'bp_id', b'unknown').decode('utf-8', errors='replace') if bp_info else 'unknown'
-                    marker = " *" if tid == current_bp_thread_id else ""
-                    print(f"  {tid.decode('utf-8', errors='replace')}: breakpoint '{bp_name}'{marker}")
+                    tid_str = tid.decode('utf-8', errors='replace')
+                    bp_info = get_breakpoint_info(tid_str)
+                    bp_name = bp_info.get('bp_id', 'unknown') if bp_info else 'unknown'
+                    marker = " *" if tid_str == current_bp_thread_id else ""
+                    print(f"  {tid_str}: breakpoint '{bp_name}'{marker}")
             continue
 
         if cmd.startswith("thread "):
-            new_thread_id = cmd[7:].strip().encode('utf-8')
+            new_thread_id = cmd[7:].strip()
             threads = get_breakpoint_threads()
-            if new_thread_id in threads:
+            threads_str = [t.decode('utf-8', errors='replace') for t in threads]
+            if new_thread_id in threads_str:
                 current_bp_thread_id = new_thread_id
                 new_info = get_breakpoint_info(new_thread_id)
                 if new_info:
-                    print(f"Switched to thread {new_thread_id.decode('utf-8', errors='replace')}")
-                    print(f"Breakpoint: {new_info.get(b'bp_id', b'unknown').decode('utf-8', errors='replace')}")
-                    new_locals = new_info.get(b'locals', [])
+                    print(f"Switched to thread {new_thread_id}")
+                    print(f"Breakpoint: {new_info.get('bp_id', 'unknown')}")
+                    new_locals = new_info.get('locals', [])
                     if new_locals:
-                        print(f"Local variables: {b', '.join(new_locals).decode('utf-8', errors='replace')}")
+                        print(f"Local variables: {', '.join(new_locals)}")
                 else:
-                    print(f"Switched to thread {new_thread_id.decode('utf-8', errors='replace')} (no info available)")
+                    print(f"Switched to thread {new_thread_id} (no info available)")
             else:
-                threads_str = [t.decode('utf-8', errors='replace') for t in threads]
-                print(f"Thread '{new_thread_id.decode('utf-8', errors='replace')}' not found in breakpoint.")
+                print(f"Thread '{new_thread_id}' not found in breakpoint.")
                 print(f"Available threads: {', '.join(threads_str) if threads_str else 'none'}")
             continue
 
@@ -602,11 +619,11 @@ def handle_breakpoint_mode(thread_id: bytes, info: Dict[bytes, any]) -> None:
             continue
 
         if cmd == "continue":
-            response = send_breakpoint_command(current_bp_thread_id, b"continue")
-            print(f"Resuming thread {current_bp_thread_id.decode('utf-8', errors='replace')}...")
+            response = send_breakpoint_command(current_bp_thread_id, "continue")
+            print(f"Resuming thread {current_bp_thread_id}...")
             # Check if there are other threads still in breakpoint
             threads = get_breakpoint_threads()
-            remaining = [t for t in threads if t != current_bp_thread_id]
+            remaining = [t for t in threads if t.decode('utf-8', errors='replace') != current_bp_thread_id]
             if remaining:
                 print(f"Note: {len(remaining)} other thread(s) still in breakpoint.")
                 print("Use 'bp list' to see them, or they will trigger breakpoint mode when detected.")
@@ -615,9 +632,9 @@ def handle_breakpoint_mode(thread_id: bytes, info: Dict[bytes, any]) -> None:
             return
 
         # Send Lua command to game
-        response = send_breakpoint_command(current_bp_thread_id, cmd.encode('utf-8'))
+        response = send_breakpoint_command(current_bp_thread_id, cmd)
         if response is not None:
-            print(response.decode('utf-8', errors='replace'))
+            print(response)
         else:
             print("(no response or timeout)")
 
@@ -634,7 +651,7 @@ def signal_handler(sig: int, frame) -> None:
 nextFile: int = 0
 send_lock: threading.Lock = threading.Lock()  # Thread safety for nextFile and file I/O
 
-def send_data_to_game(data: bytes, print_prompt_after: bool = False):
+def send_data_to_game(data: str, print_prompt_after: bool = False):
     """Send data to the game and wait for response. Thread-safe.
 
     Uses single out.txt file with format: "{index}\\n{result}"
@@ -644,7 +661,7 @@ def send_data_to_game(data: bytes, print_prompt_after: bool = False):
         print_prompt_after: If True, print the prompt after the result (used for file/watch commands)
     """
     global nextFile
-    if data == b"":
+    if data == "":
         return
     with send_lock:
         create_file(os.path.join(FILES_ROOT, f"in{nextFile}.txt"), data)
@@ -685,7 +702,7 @@ def send_file_to_game(filepath: str) -> None:
         print(f"Error: File does not exist: {filepath}")
         return
 
-    with open(filepath, 'rb') as f:
+    with open(filepath, 'r', encoding='utf-8') as f:
         data = f.read()
 
     # Wrap with OnInit immediate execution wrapper
@@ -780,12 +797,12 @@ def main() -> None:
             bp_list_threads()
             continue
         elif command.startswith("bp info "):
-            thread_id = command[8:].strip().encode('utf-8')
+            thread_id = command[8:].strip()
             bp_show_info(thread_id)
             continue
         else:
-            data = command.encode('utf-8')
-        if data == b"":
+            data = command
+        if data == "":
             continue
         send_data_to_game(data)
 
