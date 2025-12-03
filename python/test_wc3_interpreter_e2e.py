@@ -24,7 +24,7 @@ from wc3_interpreter import (
     set_files_root,
     create_file,
     load_file,
-    load_raw_file,
+    load_nonloadable_file,
     get_breakpoint_threads,
     get_breakpoint_info,
     send_breakpoint_command,
@@ -47,9 +47,20 @@ class EndToEndBreakpointTest(unittest.TestCase):
     """End-to-end tests for the breakpoint system."""
 
     def setUp(self):
-        """Set up a temporary directory for file I/O."""
+        """Set up a temporary directory for file I/O.
+        
+        The directory structure mirrors the real WC3 environment:
+        - temp_dir/ is the base (like CustomMapData/)
+        - temp_dir/Interpreter/ is where Python looks for files (FILES_ROOT)
+        - Lua's FILEIO_MIRROR_ROOT is set to temp_dir/, and LiveCoding.lua
+          writes to "Interpreter\\bp_*.txt" which becomes temp_dir/Interpreter/bp_*.txt
+        """
         self.temp_dir = tempfile.mkdtemp(prefix="wc3_e2e_test_")
-        set_files_root(self.temp_dir)
+        # Python's FILES_ROOT should point to the Interpreter subdirectory
+        # (matching the real-world structure where FILES_ROOT = CustomMapData/Interpreter/)
+        self.interpreter_dir = os.path.join(self.temp_dir, "Interpreter")
+        os.makedirs(self.interpreter_dir, exist_ok=True)
+        set_files_root(self.interpreter_dir)
         # Reset command indices for each test
         bp_command_indices.clear()
         self.lua_process = None

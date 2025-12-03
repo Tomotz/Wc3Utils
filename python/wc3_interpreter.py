@@ -364,8 +364,16 @@ def parse_indexed_output(content: bytes) -> Tuple[Optional[bytes], Optional[byte
     return None, None
 
 
-def load_raw_file(filename: str) -> Optional[bytes]:
-    """Load a raw file (not in WC3 preload format). Used for breakpoint metadata files."""
+def load_nonloadable_file(filename: str) -> Optional[bytes]:
+    """Read payload from files saved via FileIO.Save(..., isLoadable=False) in the test environment.
+
+    In WC3, these files still go through the Preload mechanism but don't contain the markers
+    used by load_file(). In our Lua test harness, FileIO mocks mirror the escaped payload
+    directly to disk via FILEIO_MIRROR_ROOT, and we read it as-is here.
+
+    This function is used for breakpoint metadata files (bp_threads.txt, bp_data_*.txt, bp_out.txt)
+    which are saved with isLoadable=False by LiveCoding.lua.
+    """
     if not os.path.exists(filename):
         return None
     with open(filename, 'rb') as file:
@@ -377,8 +385,8 @@ def get_breakpoint_threads() -> List[bytes]:
     bp_threads_file = os.path.join(FILES_ROOT, "bp_threads.txt")
     if not os.path.exists(bp_threads_file):
         return []
-    # Breakpoint metadata files are written as raw files (not preload format)
-    content = load_raw_file(bp_threads_file)
+    # Breakpoint metadata files are saved with isLoadable=False and mirrored to disk by the test harness
+    content = load_nonloadable_file(bp_threads_file)
     if not content:
         return []
     if not content.strip():
@@ -403,8 +411,8 @@ def get_breakpoint_info(thread_id: str) -> Optional[Dict[str, any]]:
     bp_data_file = os.path.join(FILES_ROOT, f"bp_data_{thread_id}.txt")
     if not os.path.exists(bp_data_file):
         return None
-    # Breakpoint metadata files are written as raw files (not preload format)
-    content = load_raw_file(bp_data_file)
+    # Breakpoint metadata files are saved with isLoadable=False and mirrored to disk by the test harness
+    content = load_nonloadable_file(bp_data_file)
     if not content:
         return None
     content_str = content
@@ -503,8 +511,8 @@ def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
     while time.time() - start_time < timeout:
         bp_out_file = os.path.join(FILES_ROOT, "bp_out.txt")
         if os.path.exists(bp_out_file):
-            # Breakpoint output files are written as raw files (not preload format)
-            content = load_raw_file(bp_out_file)
+            # Breakpoint output files are saved with isLoadable=False and mirrored to disk by the test harness
+            content = load_nonloadable_file(bp_out_file)
             if content:
                 index, result = parse_indexed_output(content)
                 if index and index.decode('utf-8', errors='replace') == expected_prefix:
