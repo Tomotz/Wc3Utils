@@ -102,8 +102,7 @@ bp_monitor_thread = None  # Background thread for monitoring breakpoints
 bp_monitor_stop_event = threading.Event()  # Event to signal thread to stop
 in_breakpoint_mode = False  # Flag to indicate if we're in breakpoint mode
 current_bp_thread_id = None  # Current breakpoint thread ID being interacted with
-bp_command_indices = {}  # Maps thread_id to next command index
-nextBpFile = 0  # Global index for breakpoint input files (matches Lua side)
+bp_command_indices = {}  # Maps thread_id to next command index (per-thread counters)
 
 # Field separator for breakpoint data files (ASCII 31 = unit separator)
 FIELD_SEP = chr(31)
@@ -352,10 +351,13 @@ def get_breakpoint_threads() -> list:
 def get_breakpoint_info(thread_id: str) -> dict:
     """Get breakpoint info for a specific thread by reading bp_data_<thread_id>.txt.
     
-    File format uses FIELD_SEP (ASCII 31) as separator:
-    - bp_id<SEP>value
-    - stack<SEP>value (with \\n for newlines)
-    - var_name<SEP>var_value (one per local variable)
+    File format is a single FIELD_SEP-separated record:
+    bp_id<SEP>value<SEP>stack<SEP>stacktrace<SEP>var1<SEP>val1<SEP>var2<SEP>val2...
+    
+    Fields are parsed in pairs: key, value, key, value, ...
+    - bp_id: breakpoint identifier
+    - stack: stacktrace (with \\n for newlines)
+    - other keys: local variable names with their values
     
     Returns a dict with keys: bp_id, stack, locals_values (dict of name->value).
     The 'locals' list is derived from locals_values keys.
@@ -367,21 +369,26 @@ def get_breakpoint_info(thread_id: str) -> dict:
     if not content:
         return None
     content_str = content.decode('utf-8') if isinstance(content, bytes) else content
-    if not content_str.strip():
+    text = content_str.strip()
+    if not text:
         return None
     
+    # Split by FIELD_SEP and parse in pairs
+    parts = text.split(FIELD_SEP)
     info = {'thread_id': thread_id, 'locals_values': {}}
-    for line in content_str.split('\n'):
-        if FIELD_SEP in line:
-            key, value = line.split(FIELD_SEP, 1)
-            if key == 'bp_id':
-                info['bp_id'] = value
-            elif key == 'stack':
-                # Unescape newlines in stacktrace
-                info['stack'] = value.replace('\\n', '\n')
-            else:
-                # Local variable value
-                info['locals_values'][key] = value
+    
+    i = 0
+    while i + 1 < len(parts):
+        key, value = parts[i], parts[i + 1]
+        i += 2
+        if key == 'bp_id':
+            info['bp_id'] = value
+        elif key == 'stack':
+            # Unescape newlines in stacktrace
+            info['stack'] = value.replace('\\n', '\n')
+        else:
+            # Local variable value
+            info['locals_values'][key] = value
     
     # Derive locals list from locals_values keys
     info['locals'] = list(info['locals_values'].keys())
@@ -433,21 +440,21 @@ def bp_show_info(thread_id: str):
 def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
     """Send a command to a specific breakpoint thread and wait for response.
     
-    Uses incrementing bp_in{N}.txt files due to WC3 file caching.
-    Format: thread_id:cmd_index:command -> bp_in{N}.txt
+    Uses per-thread incrementing bp_in_<thread_id>_<idx>.txt files due to WC3 file caching.
+    File content is just the raw command (no prefix needed since thread_id is in filename).
     Response: thread_id:cmd_index\\nresult <- bp_out.txt
     """
-    global bp_command_indices, nextBpFile
+    global bp_command_indices
     
     if thread_id not in bp_command_indices:
         bp_command_indices[thread_id] = 0
     
     cmd_index = bp_command_indices[thread_id]
     
-    # Write command to bp_in{nextBpFile}.txt (incrementing files due to WC3 caching)
-    cmd_content = f"{thread_id}:{cmd_index}:{command}"
-    create_file(FILES_ROOT + f"bp_in{nextBpFile}.txt", cmd_content)
-    nextBpFile += 1
+    # Write command to bp_in_<thread_id>_<cmd_index>.txt
+    # File content is just the raw command (thread_id is in filename)
+    filename = FILES_ROOT + f"bp_in_{thread_id}_{cmd_index}.txt"
+    create_file(filename, command)
     
     # Wait for response in bp_out.txt
     expected_prefix = f"{thread_id}:{cmd_index}"
@@ -742,7 +749,6 @@ def main():
             stop_all_watchers()
             remove_all_files()
             nextFile = 0
-            nextBpFile = 0
             bp_command_indices = {}
             start_breakpoint_monitor()
             print("State reset. You can start a new game now.")

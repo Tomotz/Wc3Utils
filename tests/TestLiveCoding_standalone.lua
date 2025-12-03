@@ -422,31 +422,40 @@ end
 local FIELD_SEP = string.char(31)
 
 -- Track breakpoint input file index (matches nextBpFile in LiveCoding.lua)
-local nextBpInputFile = 0
+-- Per-thread command indices for bp_in files (maps threadId -> next index)
+local bpCommandIndices = {}
 
 -- Helper to get breakpoint data for a specific thread
 -- Returns a table with bp_id, locals (list derived from locals_values keys), stack, and locals_values (table)
--- File format uses FIELD_SEP (ASCII 31) as separator:
---   bp_id<SEP>value
---   stack<SEP>value (with \n escaped as \\n)
---   var_name<SEP>var_value (one per local variable)
+-- File format is a single FIELD_SEP-separated record:
+--   bp_id<SEP>value<SEP>stack<SEP>stacktrace<SEP>var1<SEP>val1<SEP>var2<SEP>val2...
 local function getBreakpointData(threadId)
     local content = FileIO.Load("Interpreter\\bp_data_" .. threadId .. ".txt")
-    if not content then
+    if not content or content == "" then
         return nil
     end
     local data = {locals_values = {}}
-    for line in content:gmatch("[^\n]+") do
-        if line:find(FIELD_SEP) then
-            local key, value = line:match("^([^" .. FIELD_SEP .. "]+)" .. FIELD_SEP .. "(.*)$")
-            if key == "bp_id" then
-                data.bp_id = value
-            elseif key == "stack" then
-                data.stack = value:gsub("\\n", "\n")
-            elseif key then
-                -- Local variable value
-                data.locals_values[key] = value
-            end
+    -- Split by FIELD_SEP and parse in pairs
+    local parts = {}
+    for part in (content .. FIELD_SEP):gmatch("([^" .. FIELD_SEP .. "]*)" .. FIELD_SEP) do
+        table.insert(parts, part)
+    end
+    -- Remove the last empty element from the trailing separator
+    if #parts > 0 and parts[#parts] == "" then
+        table.remove(parts)
+    end
+    
+    local i = 1
+    while i + 1 <= #parts do
+        local key, value = parts[i], parts[i + 1]
+        i = i + 2
+        if key == "bp_id" then
+            data.bp_id = value
+        elseif key == "stack" then
+            data.stack = value:gsub("\\n", "\n")
+        elseif key then
+            -- Local variable value
+            data.locals_values[key] = value
         end
     end
     -- Derive locals list from locals_values keys
@@ -517,10 +526,11 @@ function test_Breakpoint_shows_local_variables()
     Debug.assert(bpData.locals_values["myString"] == "hello", 
         "myString should be 'hello', got: " .. tostring(bpData.locals_values["myString"]))
     
-    -- Send continue command to resume execution using new format: thread_id:cmd_index:command
-    -- Uses incrementing bp_in{N}.txt files due to WC3 file caching
-    FileIO.Save("Interpreter\\bp_in" .. nextBpInputFile .. ".txt", threadId .. ":0:continue")
-    nextBpInputFile = nextBpInputFile + 1
+    -- Send continue command to resume execution using per-thread bp_in files
+    -- Format: bp_in_<threadId>_<idx>.txt with just the raw command
+    local cmdIdx = bpCommandIndices[threadId] or 0
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "continue")
+    bpCommandIndices[threadId] = cmdIdx + 1
     
     -- Advance time to let the breakpoint process the continue command
     TriggerSleepAction(0.6)
@@ -562,10 +572,11 @@ function test_Breakpoint_output_format_without_locals()
     Debug.assert(bpData.locals ~= nil and #bpData.locals == 0, 
         "Output should have empty locals list when none provided")
     
-    -- Send continue command to clean up using new format
-    -- Uses incrementing bp_in{N}.txt files due to WC3 file caching
-    FileIO.Save("Interpreter\\bp_in" .. nextBpInputFile .. ".txt", threadId .. ":0:continue")
-    nextBpInputFile = nextBpInputFile + 1
+    -- Send continue command to clean up using per-thread bp_in files
+    -- Format: bp_in_<threadId>_<idx>.txt with just the raw command
+    local cmdIdx = bpCommandIndices[threadId] or 0
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "continue")
+    bpCommandIndices[threadId] = cmdIdx + 1
     TriggerSleepAction(0.6)
     processTimersAndCoroutines()
     

@@ -30,8 +30,10 @@ cli commands:
  - watching - list all currently watched files
  - bp list - list all threads currently in a breakpoint
  - bp info <thread_id> - get breakpoint info for a specific thread
- - bp <thread_id> <command> - send a command to a specific breakpoint thread
  - <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.
+Breakpoint mode:
+ When a Breakpoint() is hit, the interpreter enters breakpoint mode.
+ Commands: list, thread <id>, info, continue, help, and Lua code.
 * Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **
 
 Algorithm explanation:
@@ -115,12 +117,11 @@ end
 -- ============================================================================
 -- Breakpoints use per-coroutine data files and a shared metadata file:
 -- - bp_threads.txt: Lists all thread IDs currently in a breakpoint (one per line)
--- - bp_data_<thread_id>.txt: Contains breakpoint data for each thread using \x1F (unit separator) as field separator:
---     bp_id\x1F<breakpoint_id>
---     stack\x1F<stacktrace with \n escaped as \\n>
---     <var_name>\x1F<var_value> (one per local variable)
--- - bp_in{N}.txt: Input commands (incrementing files due to WC3 file caching)
---     Format: "thread_id:cmd_index:command"
+-- - bp_data_<thread_id>.txt: Contains breakpoint data as a single FIELD_SEP-separated record:
+--     bp_id<SEP>value<SEP>stack<SEP>stacktrace<SEP>var1<SEP>val1<SEP>var2<SEP>val2...
+--     (stacktrace has \n escaped as \\n)
+-- - bp_in_<thread_id>_<idx>.txt: Per-thread input commands (incrementing files due to WC3 file caching)
+--     Content is just the raw command (no prefix needed since thread_id is in filename)
 -- - bp_out.txt: Output results with format "thread_id:cmd_index\nresult"
 
 -- Field separator for breakpoint data files (ASCII 31 = unit separator)
@@ -128,8 +129,6 @@ end
 local FIELD_SEP = string.char(31)
 
 local activeBreakpointThreads = {} ---@type table<string, boolean> -- Maps thread_id to true if in breakpoint
-local bpCommandIndex = {} ---@type table<string, integer> -- Maps thread_id to next expected command index
-local nextBpFile = 0 -- Global index for breakpoint input files (due to WC3 file caching)
 
 --- Get a unique identifier for the current coroutine
 ---@return string
@@ -157,29 +156,35 @@ end
 
 --- Write breakpoint data file for a specific thread
 --- Uses FIELD_SEP (ASCII 31) as field separator to avoid conflicts with variable values
+--- Format: bp_id<SEP>value<SEP>stack<SEP>stacktrace<SEP>var1<SEP>val1<SEP>var2<SEP>val2...
 ---@param threadId string
 ---@param breakpointId string|integer
 ---@param localVariables table<string, any>?
 local function writeBreakpointDataFile(threadId, breakpointId, localVariables)
-    local lines = {}
-    -- Format: key<FIELD_SEP>value per line
-    table.insert(lines, "bp_id" .. FIELD_SEP .. tostring(breakpointId))
+    local fields = {}
+    -- Add bp_id
+    table.insert(fields, "bp_id")
+    table.insert(fields, tostring(breakpointId))
     
     -- Add stacktrace (use Debug.traceback for WC3 compatibility)
     local stack = ""
     if Debug and Debug.traceback then
         stack = Debug.traceback("", 3) or ""
     end
-    table.insert(lines, "stack" .. FIELD_SEP .. stack:gsub("\n", "\\n"))
+    table.insert(fields, "stack")
+    -- Note: gsub returns two values, we only want the first (the modified string)
+    local escapedStack = stack:gsub("\n", "\\n")
+    table.insert(fields, escapedStack)
     
     -- Add local variable values (names are derived from keys)
     if localVariables then
         for k, v in pairs(localVariables) do
-            table.insert(lines, k .. FIELD_SEP .. formatOutput(v))
+            table.insert(fields, k)
+            table.insert(fields, formatOutput(v))
         end
     end
     
-    FileIO.Save(FILES_ROOT .. "\\bp_data_" .. threadId .. ".txt", table.concat(lines, "\n"))
+    FileIO.Save(FILES_ROOT .. "\\bp_data_" .. threadId .. ".txt", table.concat(fields, FIELD_SEP))
 end
 
 --- Remove breakpoint data file for a specific thread
@@ -225,61 +230,50 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
     -- Get thread ID and register this breakpoint
     local threadId = getThreadId()
     activeBreakpointThreads[threadId] = true
-    bpCommandIndex[threadId] = 0
     
     -- Write breakpoint data file and update metadata
     writeBreakpointDataFile(threadId, breakpointId, localVariables)
     updateBreakpointThreadsFile()
 
     -- Main breakpoint loop - wait for commands
-    -- Uses incrementing bp_in{N}.txt files due to WC3 file caching (can't read same file twice)
+    -- Uses per-thread incrementing bp_in_<threadId>_<idx>.txt files due to WC3 file caching
+    -- Each thread has its own local command index to avoid clashing between breakpoints
+    local cmdIndex = 0
     while true do
-        -- Check for commands in bp_in{nextBpFile}.txt
-        local inputContent = FileIO.Load(FILES_ROOT .. "\\bp_in" .. nextBpFile .. ".txt")
-        if inputContent ~= nil then
-            -- Parse format: "thread_id:cmd_index:command"
-            local targetThread, cmdIndexStr, command = inputContent:match("^([^:]+):(%d+):(.*)$")
+        -- Check for commands in bp_in_<threadId>_<cmdIndex>.txt
+        local filename = FILES_ROOT .. "\\bp_in_" .. threadId .. "_" .. cmdIndex .. ".txt"
+        local command = FileIO.Load(filename)
+        if command ~= nil then
+            -- Command found - file content is just the raw command
+            if command == "continue" then
+                -- Clean up and exit breakpoint
+                activeBreakpointThreads[threadId] = nil
+                removeBreakpointDataFile(threadId)
+                updateBreakpointThreadsFile()
+                return
+            end
             
-            -- Increment file index immediately after reading (file can only be read once)
-            nextBpFile = nextBpFile + 1
-            
-            if targetThread == threadId then
-                local cmdIndex = tonumber(cmdIndexStr) or 0
-                local expectedIndex = bpCommandIndex[threadId]
-                
-                if cmdIndex == expectedIndex then
-                    bpCommandIndex[threadId] = expectedIndex + 1
-                    
-                    if command == "continue" then
-                        -- Clean up and exit breakpoint
-                        activeBreakpointThreads[threadId] = nil
-                        bpCommandIndex[threadId] = nil
-                        removeBreakpointDataFile(threadId)
-                        updateBreakpointThreadsFile()
-                        return
-                    end
-                    
-                    -- Execute the command with proper error handling
-                    local cur_func, loadErr = load(command, "breakpoint_cmd", "t", env)
-                    local outData
-                    if cur_func == nil then
-                        outData = "Syntax error: " .. tostring(loadErr)
-                    else
-                        local ok, result = pcall(cur_func)
-                        if ok then
-                            outData = formatOutput(result)
-                        else
-                            outData = "Runtime error: " .. tostring(result)
-                        end
-                    end
-                    
-                    -- Write result using shared format
-                    writeIndexedOutput(FILES_ROOT .. "\\bp_out.txt", threadId .. ":" .. cmdIndex, outData)
-                    
-                    -- Update breakpoint data file (in case locals changed)
-                    writeBreakpointDataFile(threadId, breakpointId, localVariables)
+            -- Execute the command with proper error handling
+            local cur_func, loadErr = load(command, "breakpoint_cmd", "t", env)
+            local outData
+            if cur_func == nil then
+                outData = "Syntax error: " .. tostring(loadErr)
+            else
+                local ok, result = pcall(cur_func)
+                if ok then
+                    outData = formatOutput(result)
+                else
+                    outData = "Runtime error: " .. tostring(result)
                 end
             end
+            
+            -- Write result using shared format (thread_id:cmd_index as index)
+            writeIndexedOutput(FILES_ROOT .. "\\bp_out.txt", threadId .. ":" .. cmdIndex, outData)
+            
+            -- Update breakpoint data file (in case locals changed)
+            writeBreakpointDataFile(threadId, breakpointId, localVariables)
+            
+            cmdIndex = cmdIndex + 1
         end
         TriggerSleepAction(0.1)
     end
