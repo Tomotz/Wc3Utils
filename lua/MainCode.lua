@@ -88,7 +88,7 @@ function RegisterFastTimer()
 end
 
 function RegisterSlowTimer()
-    local msg = "Type -d to dump recent functions to log. Type -s to trigger a desyncing function. -c for crash test. -e for escaping tests. -sy for syncStream tests. -se for serializer tests. Counter =" ..
+    local msg = "Type -d to dump recent functions to log. Type -s to trigger a desyncing function. -c for crash test. -e for escaping tests. -sy for syncStream tests. -se for serializer tests. -b for breakpoint tests. Counter =" ..
                 Counter
     print(msg)
     TimerStart(CreateTimer(), 20, true,

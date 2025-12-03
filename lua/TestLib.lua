@@ -314,7 +314,7 @@ function test_saveLoad(tbl)
         callbackExecuted = true
     end)
     LogWrite("loaded returned:", error)
-    
+
     -- Wait for the callback to be executed
     local count = 0
     while not callbackExecuted and count < 100 do
@@ -433,6 +433,25 @@ function testFileIO()
 
     print("FileIO savefile/loadfile end")
     LogWriteNoFlush("FileIO savefile/loadfile end")
+end
+
+-- Test function to trigger different breakpoint scenarios
+--- Need to wrap with ExecuteFunc or trigger
+function TestBreakpoints()
+    -- Test 1: Basic breakpoint with local variables
+    local playerGold = 1000
+    local playerLevel = 5
+    Breakpoint("basic_test", {gold = playerGold, level = playerLevel})
+
+    -- Test 2: Conditional breakpoint (only triggers if gold > 500)
+    playerGold = 600
+    Breakpoint("conditional_test", {gold = playerGold}, "return gold > 500")
+
+    -- Test 3: Disabled breakpoint (won't trigger)
+    Breakpoint("disabled_test", nil, nil, false)
+
+    -- Test 4: Breakpoint that can be enabled/disabled dynamically
+    Breakpoint("dynamic_test", {status = "testing"})
 end
 
 OnInit.final(function()

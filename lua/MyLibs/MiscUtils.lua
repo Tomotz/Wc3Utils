@@ -188,6 +188,7 @@ OnInit.trig(function()
         ["-sy"] = TestSyncStream,
         ["-o"] = TestOrigSync,
         ["-f"] = FlushLog,
+        ["-b"] = TestBreakpoints,
     }
 end)
 end --- Chat Command Handler

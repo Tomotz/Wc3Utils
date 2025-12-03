@@ -85,7 +85,7 @@ EnabledBreakpoints = {} ---@type table<string | integer, boolean> -- saves for e
 ---@param index string|integer -- The command index (or thread_id:cmd_index for breakpoints)
 ---@param result string -- The result to write
 local function writeIndexedOutput(filename, index, result)
-    FileIO.Save(filename, tostring(index) .. "\n" .. result)
+    FileIO.Save(filename, tostring(index) .. "\n" .. result, false)
 end
 
 --- Helper to format output for responses
@@ -147,10 +147,10 @@ local function updateBreakpointThreadsFile()
         table.insert(threads, threadId)
     end
     if #threads > 0 then
-        FileIO.Save(FILES_ROOT .. "\\bp_threads.txt", table.concat(threads, "\n"))
+        FileIO.Save(FILES_ROOT .. "\\bp_threads.txt", table.concat(threads, "\n"), false)
     else
         -- Write empty marker when no threads are in breakpoint
-        FileIO.Save(FILES_ROOT .. "\\bp_threads.txt", "")
+        FileIO.Save(FILES_ROOT .. "\\bp_threads.txt", "", false)
     end
 end
 
@@ -165,17 +165,17 @@ local function writeBreakpointDataFile(threadId, breakpointId, localVariables)
     -- Add bp_id
     table.insert(fields, "bp_id")
     table.insert(fields, tostring(breakpointId))
-    
+
     -- Add stacktrace (use Debug.traceback for WC3 compatibility)
     local stack = ""
     if Debug and Debug.traceback then
-        stack = Debug.traceback("", 3) or ""
+        stack = Debug.traceback() or ""
     end
     table.insert(fields, "stack")
     -- Note: gsub returns two values, we only want the first (the modified string)
     local escapedStack = stack:gsub("\n", "\\n")
     table.insert(fields, escapedStack)
-    
+
     -- Add local variable values (names are derived from keys)
     if localVariables then
         for k, v in pairs(localVariables) do
@@ -183,15 +183,15 @@ local function writeBreakpointDataFile(threadId, breakpointId, localVariables)
             table.insert(fields, formatOutput(v))
         end
     end
-    
-    FileIO.Save(FILES_ROOT .. "\\bp_data_" .. threadId .. ".txt", table.concat(fields, FIELD_SEP))
+
+    FileIO.Save(FILES_ROOT .. "\\bp_data_" .. threadId .. ".txt", table.concat(fields, FIELD_SEP), false)
 end
 
 --- Remove breakpoint data file for a specific thread
 ---@param threadId string
 local function removeBreakpointDataFile(threadId)
     -- Write empty content to indicate the breakpoint is no longer active
-    FileIO.Save(FILES_ROOT .. "\\bp_data_" .. threadId .. ".txt", "")
+    FileIO.Save(FILES_ROOT .. "\\bp_data_" .. threadId .. ".txt", "", false)
 end
 
 --- Put a breakpoint in your code that will halt execution of a function and wait for external debugger instructions.
@@ -226,11 +226,11 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
 
     -- Create environment with locals and globals accessible
     local env = createBreakpointEnv(localVariables)
-    
+
     -- Get thread ID and register this breakpoint
     local threadId = getThreadId()
     activeBreakpointThreads[threadId] = true
-    
+
     -- Write breakpoint data file and update metadata
     writeBreakpointDataFile(threadId, breakpointId, localVariables)
     updateBreakpointThreadsFile()
@@ -252,7 +252,7 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
                 updateBreakpointThreadsFile()
                 return
             end
-            
+
             -- Execute the command with proper error handling
             local cur_func, loadErr = load(command, "breakpoint_cmd", "t", env)
             local outData
@@ -266,13 +266,13 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
                     outData = "Runtime error: " .. tostring(result)
                 end
             end
-            
+
             -- Write result using shared format (thread_id:cmd_index as index)
             writeIndexedOutput(FILES_ROOT .. "\\bp_out.txt", threadId .. ":" .. cmdIndex, outData)
-            
+
             -- Update breakpoint data file (in case locals changed)
             writeBreakpointDataFile(threadId, breakpointId, localVariables)
-            
+
             cmdIndex = cmdIndex + 1
         end
         TriggerSleepAction(0.1)
@@ -323,7 +323,7 @@ function TryInterpret(period)
     TimerStart(timer, period or 5, false, CheckFiles)
 end
 
-OnInit(TryInterpret)
+OnInit(function() TryInterpret(5) end)
 
 end
 if Debug then Debug.endFile() end
