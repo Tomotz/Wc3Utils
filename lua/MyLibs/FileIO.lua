@@ -99,12 +99,6 @@ if Debug then Debug.beginFile("FileIO") end
         name = nil
     end
 
-    -- Optional: Set this global to a directory path to mirror file writes to real OS files.
-    -- Used by E2E tests where Python needs to read files written by Lua.
-    -- Default is nil (no mirroring). Only set this in test environments.
-    ---@type string?
-    FILEIO_MIRROR_ROOT = FILEIO_MIRROR_ROOT or nil
-
     ---@param filename string
     ---@param data string
     ---@param isLoadable boolean? -- Use false only if you never plan to load the file. Default is true.
@@ -123,59 +117,11 @@ if Debug then Debug.beginFile("FileIO") end
         open(filename, isLoadable)
         write(data2, isLoadable)
         close(isLoadable)
-
-        -- Mirror to real OS files if FILEIO_MIRROR_ROOT is set (for E2E tests)
-        if FILEIO_MIRROR_ROOT then
-            pcall(function()
-                -- Normalize path separators (WC3 uses backslashes, OS may use forward slashes)
-                local normalized = filename:gsub("\\", "/")
-                local full = FILEIO_MIRROR_ROOT .. normalized
-                -- Create parent directory if needed
-                local dir = full:match("^(.*)/[^/]+$")
-                if dir then
-                    os.execute('mkdir -p "' .. dir .. '"')
-                end
-                local f = io.open(full, "wb")
-                if f then
-                    f:write(data2)
-                    f:close()
-                end
-            end)
-        end
     end
 
     ---@param filename string
     ---@return string?
     local function loadfile(filename)
-        -- If FILEIO_MIRROR_ROOT is set, try to read from real OS files first (for E2E tests)
-        -- This allows Python to write command files that Lua can read
-        if FILEIO_MIRROR_ROOT then
-            local ok, result = pcall(function()
-                local normalized = filename:gsub("\\", "/")
-                local full = FILEIO_MIRROR_ROOT .. normalized
-                local f = io.open(full, "rb")
-                if f then
-                    local content = f:read("*all")
-                    f:close()
-                    if content and #content > 0 then
-                        -- The file contains escaped data in preload format
-                        -- Extract the payload using the same pattern as wc3_interpreter.py
-                        local parts = {}
-                        for match in content:gmatch("%]%]i%(%[%[(.-)%]%]%)%-%-") do
-                            table.insert(parts, match)
-                        end
-                        if #parts > 0 then
-                            return RemoveEscaping(table.concat(parts), FileIO_unsupportedLoadChars)
-                        end
-                    end
-                end
-                return nil
-            end)
-            if ok and result then
-                return result
-            end
-        end
-
         local s = BlzGetAbilityTooltip(LOAD_ABILITY, 0)
         BlzSetAbilityTooltip(LOAD_ABILITY, LOAD_EMPTY_KEY, 0)
         Preloader(filename)

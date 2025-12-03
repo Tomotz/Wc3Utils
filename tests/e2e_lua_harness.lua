@@ -58,14 +58,15 @@ GameStatus = GAME_STATUS_OFFLINE
 bj_isSinglePlayer = true
 
 -- ============================================================================
--- Set up FILEIO_MIRROR_ROOT for real file I/O
+-- Set up MOCK_FILE_MIRROR_ROOT for real file I/O
 -- ============================================================================
 
--- This global tells FileIO.lua to mirror all file writes to real OS files
--- so that the Python interpreter can read them
-FILEIO_MIRROR_ROOT = filesRoot
+-- This global tells TestLib_mocks.lua to mirror all file writes to real OS files
+-- so that the Python interpreter can read them. This is a test-only feature
+-- that doesn't modify any production code.
+MOCK_FILE_MIRROR_ROOT = filesRoot
 
-print("=== FILEIO_MIRROR_ROOT set to: " .. FILEIO_MIRROR_ROOT .. " ===")
+print("=== MOCK_FILE_MIRROR_ROOT set to: " .. MOCK_FILE_MIRROR_ROOT .. " ===")
 
 -- ============================================================================
 -- Load Required Libraries (the REAL ones, not reimplementations)
