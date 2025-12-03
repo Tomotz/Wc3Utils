@@ -407,12 +407,37 @@ function clearRunningCoroutines()
     runningCoroutines = {}
 end
 
+---Resume one coroutine that's ready to resume
+---This is useful for breakpoint tests where we want to resume the breakpoint coroutine
+---once to process a command, without getting stuck in an infinite loop
+---@return boolean -- true if a coroutine was resumed
+function resumeOneCoroutine()
+    local i = 1
+    while i <= #runningCoroutines do
+        local coData = runningCoroutines[i]
+        if coData.resumeTime <= currentTime then
+            table.remove(runningCoroutines, i)
+            local success, err = coroutine.resume(coData.co)
+            if not success then
+                error("Coroutine error: " .. tostring(err))
+            end
+            return true  -- Only resume one coroutine
+        else
+            i = i + 1
+        end
+    end
+    return false
+end
+
 -- ============================================================================
 -- File System (Preload/Preloader)
 -- ============================================================================
 
 ---@type table<string, string>
 local fileSystem = {}
+
+---@type table<string, string>
+local rawFileSystem = {}
 
 ---@param data string
 function Preload(data)
@@ -429,8 +454,17 @@ end
 ---@param filename string
 function PreloadGenEnd(filename)
     if fileSystem._currentFile then
-        fileSystem[filename] = table.concat(fileSystem._currentFile)
+        local content = table.concat(fileSystem._currentFile)
+        fileSystem[filename] = content
         fileSystem._currentFile = nil
+        
+        -- Also store raw content for files without //!beginusercode marker
+        -- This handles files saved with isLoadable=false
+        -- Extract raw content from Preload calls (content without the wrapper)
+        if not content:find("//!beginusercode", 1, true) then
+            -- File was saved with isLoadable=false, store raw content
+            rawFileSystem[filename] = content
+        end
     end
 end
 
@@ -464,6 +498,35 @@ function Preloader(filename)
             else
                 print("Error loading Preloader content:", err)
             end
+        end
+    end
+end
+
+---Get raw file content (for files saved with isLoadable=false)
+---@param filename string
+---@return string?
+function getRawFileContent(filename)
+    return rawFileSystem[filename]
+end
+
+---Clear a file from the mock file system
+---@param filename string
+function clearFile(filename)
+    fileSystem[filename] = nil
+    rawFileSystem[filename] = nil
+end
+
+---Clear all files matching a pattern from the mock file system
+---@param pattern string -- Lua pattern to match filenames
+function clearFilesMatching(pattern)
+    for filename in pairs(fileSystem) do
+        if filename:match(pattern) then
+            fileSystem[filename] = nil
+        end
+    end
+    for filename in pairs(rawFileSystem) do
+        if filename:match(pattern) then
+            rawFileSystem[filename] = nil
         end
     end
 end

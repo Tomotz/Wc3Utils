@@ -90,7 +90,8 @@ function test_TryInterpret_disabled_in_multiplayer()
     TriggerSleepAction(0.02)
     
         -- The output file should not exist or not have the expected index because the interpreter is disabled
-        local result = FileIO.Load("Interpreter\\out.txt")
+        -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
+        local result = getRawFileContent("Interpreter\\out.txt")
         -- Either no file exists, or the index doesn't match (meaning our command wasn't processed)
         if result then
             local index = result:match("^(%d+)\n")
@@ -122,7 +123,8 @@ function test_TryInterpret_enabled_in_singleplayer()
     TriggerSleepAction(0.02)
     
     -- The output file should exist with the result in new format: "index\nresult"
-    local result = FileIO.Load("Interpreter\\out.txt")
+    -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
+    local result = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result ~= nil, "Output file should exist")
     local index, value = result:match("^(%d+)\n(.*)$")
     Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
@@ -150,7 +152,8 @@ function test_TryInterpret_enabled_in_replay()
     TriggerSleepAction(0.02)
     
     -- The output file should exist with the result in new format: "index\nresult"
-    local result = FileIO.Load("Interpreter\\out.txt")
+    -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
+    local result = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result ~= nil, "Output file should exist")
     local index, value = result:match("^(%d+)\n(.*)$")
     Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
@@ -212,7 +215,8 @@ function test_CheckFiles_handles_return_value()
     TriggerSleepAction(0.02)
     
     -- Verify the output file contains the return value in new format: "index\nresult"
-    local result = FileIO.Load("Interpreter\\out.txt")
+    -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
+    local result = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result ~= nil, "Output file should exist")
     local index, value = result:match("^(%d+)\n(.*)$")
     Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
@@ -240,7 +244,8 @@ function test_CheckFiles_handles_nil_return()
     TriggerSleepAction(0.02)
     
     -- Verify the output file contains "nil" in new format: "index\nresult"
-    local result = FileIO.Load("Interpreter\\out.txt")
+    -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
+    local result = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result ~= nil, "Output file should exist")
     local index, value = result:match("^(%d+)\n(.*)$")
     Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
@@ -267,7 +272,8 @@ function test_CheckFiles_sequential_commands()
     -- Advance time to trigger the timer (which calls CheckFiles)
     TriggerSleepAction(0.02)
     
-    local result1 = FileIO.Load("Interpreter\\out.txt")
+    -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
+    local result1 = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result1 ~= nil, "Output file should exist")
     local index1, value1 = result1:match("^(%d+)\n(.*)$")
     Debug.assert(index1 == tostring(fileIdx1), "Expected index " .. fileIdx1 .. ", got: " .. tostring(index1))
@@ -281,7 +287,8 @@ function test_CheckFiles_sequential_commands()
     -- Note: After finding a command, CheckFiles reschedules with 0.1s period, so we need to wait at least that long
     TriggerSleepAction(0.2)
     
-    local result2 = FileIO.Load("Interpreter\\out.txt")
+    -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
+    local result2 = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result2 ~= nil, "Output file should exist")
     local index2, value2 = result2:match("^(%d+)\n(.*)$")
     Debug.assert(index2 == tostring(fileIdx2), "Expected index " .. fileIdx2 .. ", got: " .. tostring(index2))
@@ -406,7 +413,8 @@ end
 
 -- Helper to get the list of threads currently in a breakpoint
 local function getBreakpointThreads()
-    local content = FileIO.Load("Interpreter\\bp_threads.txt")
+    -- Note: bp_threads.txt is saved with isLoadable=false, so we use getRawFileContent
+    local content = getRawFileContent("Interpreter\\bp_threads.txt")
     if not content or content == "" then
         return {}
     end
@@ -430,7 +438,8 @@ local bpCommandIndices = {}
 -- File format is a single FIELD_SEP-separated record:
 --   bp_id<SEP>value<SEP>stack<SEP>stacktrace<SEP>var1<SEP>val1<SEP>var2<SEP>val2...
 local function getBreakpointData(threadId)
-    local content = FileIO.Load("Interpreter\\bp_data_" .. threadId .. ".txt")
+    -- Note: bp_data files are saved with isLoadable=false, so we use getRawFileContent
+    local content = getRawFileContent("Interpreter\\bp_data_" .. threadId .. ".txt")
     if not content or content == "" then
         return nil
     end
@@ -657,6 +666,267 @@ function test_Breakpoint_error_handling_in_condition()
 end
 
 -- ============================================================================
+-- Breakpoint Test: Basic breakpoint with local variables
+-- Tests:
+-- 1. Breakpoint triggers and creates data file
+-- 2. Inspect locals (return gold, return level)
+-- 3. Modify variables (gold = 2000 then return gold)
+-- 4. Continue execution
+-- ============================================================================
+
+function test_Breakpoint_basic_with_locals()
+    print("\n--- Running test_Breakpoint_basic_with_locals ---")
+    resetState()
+    
+    -- Enable interpreter
+    GameStatus = GAME_STATUS_OFFLINE
+    bj_isSinglePlayer = true
+    TryInterpret(0.01)
+    
+    local testComplete = false
+    
+    -- Create a coroutine that hits a basic breakpoint
+    local co = coroutine.create(function()
+        local playerGold = 1000
+        local playerLevel = 5
+        Breakpoint("basic_test", {gold = playerGold, level = playerLevel})
+        testComplete = true
+    end)
+    
+    -- Start the coroutine
+    coroutine.resume(co)
+    
+    -- Advance time to let the breakpoint write its output
+    TriggerSleepAction(0.1)
+    
+    -- Find the breakpoint
+    local threadId, bpData = findThreadWithBreakpoint("basic_test")
+    Debug.assert(threadId ~= nil, "Should find thread in basic_test breakpoint")
+    Debug.assert(bpData ~= nil, "Breakpoint data file should exist for basic_test")
+    Debug.assert(bpData.bp_id == "basic_test", "bp_id should be 'basic_test'")
+    
+    -- Test: Inspect locals - check gold value
+    Debug.assert(bpData.locals_values["gold"] == "1000", 
+        "gold should be 1000, got: " .. tostring(bpData.locals_values["gold"]))
+    
+    -- Test: Inspect locals - check level value
+    Debug.assert(bpData.locals_values["level"] == "5", 
+        "level should be 5, got: " .. tostring(bpData.locals_values["level"]))
+    
+    -- Test: Execute Lua code to inspect locals (return gold)
+    local cmdIdx = bpCommandIndices[threadId] or 0
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "return gold")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()  -- Resume breakpoint coroutine once to process command
+    
+    -- Note: bp_out.txt is saved with isLoadable=false, so we use getRawFileContent
+    local bpOutContent = getRawFileContent("Interpreter\\bp_out.txt")
+    Debug.assert(bpOutContent ~= nil, "bp_out.txt should exist after command")
+    local outIndex, outResult = bpOutContent:match("^([^\n]+)\n(.*)$")
+    Debug.assert(outResult == "1000", "return gold should give 1000, got: " .. tostring(outResult))
+    
+    -- Test: Execute Lua code to inspect locals (return level)
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "return level")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()  -- Resume breakpoint coroutine once to process command
+    
+    -- Note: bp_out.txt is saved with isLoadable=false, so we use getRawFileContent
+    bpOutContent = getRawFileContent("Interpreter\\bp_out.txt")
+    outIndex, outResult = bpOutContent:match("^([^\n]+)\n(.*)$")
+    Debug.assert(outResult == "5", "return level should give 5, got: " .. tostring(outResult))
+    
+    -- Test: Modify variables (gold = 2000 then return gold)
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "gold = 2000")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()  -- Resume breakpoint coroutine once to process command
+    
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "return gold")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()  -- Resume breakpoint coroutine once to process command
+    
+    -- Note: bp_out.txt is saved with isLoadable=false, so we use getRawFileContent
+    bpOutContent = getRawFileContent("Interpreter\\bp_out.txt")
+    outIndex, outResult = bpOutContent:match("^([^\n]+)\n(.*)$")
+    Debug.assert(outResult == "2000", "return gold after modification should give 2000, got: " .. tostring(outResult))
+    
+    -- Test: Continue execution
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "continue")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.6)
+    resumeOneCoroutine()  -- Resume breakpoint coroutine once to process continue
+    
+    -- Verify test completed
+    Debug.assert(testComplete, "Test function should have completed after continue")
+    
+    print("--- test_Breakpoint_basic_with_locals completed ---")
+end
+
+-- ============================================================================
+-- Breakpoint Test: Conditional breakpoint (only triggers if condition is true)
+-- ============================================================================
+
+function test_Breakpoint_conditional_true()
+    print("\n--- Running test_Breakpoint_conditional_true ---")
+    resetState()
+    
+    -- Enable interpreter
+    GameStatus = GAME_STATUS_OFFLINE
+    bj_isSinglePlayer = true
+    TryInterpret(0.01)
+    
+    local testComplete = false
+    
+    -- Create a coroutine that hits a conditional breakpoint with true condition
+    local co = coroutine.create(function()
+        local gold = 600  -- Greater than 500, so condition should be true
+        Breakpoint("conditional_true_test", {gold = gold}, "return gold > 500")
+        testComplete = true
+    end)
+    
+    -- Start the coroutine
+    coroutine.resume(co)
+    
+    -- Advance time to let the breakpoint trigger
+    TriggerSleepAction(0.1)
+    
+    -- The breakpoint should have triggered because gold (600) > 500
+    local threadId, bpData = findThreadWithBreakpoint("conditional_true_test")
+    Debug.assert(threadId ~= nil, "conditional_true_test should trigger (gold=600 > 500)")
+    Debug.assert(bpData ~= nil, "Breakpoint data file should exist")
+    Debug.assert(bpData.bp_id == "conditional_true_test", "bp_id should be 'conditional_true_test'")
+    Debug.assert(bpData.locals_values["gold"] == "600", 
+        "gold should be 600, got: " .. tostring(bpData.locals_values["gold"]))
+    
+    -- Continue from breakpoint
+    local cmdIdx = bpCommandIndices[threadId] or 0
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "continue")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.6)
+    resumeOneCoroutine()
+    
+    -- Verify test completed
+    Debug.assert(testComplete, "Test should complete after continue")
+    
+    print("--- test_Breakpoint_conditional_true completed ---")
+end
+
+-- ============================================================================
+-- Breakpoint Test: Dynamic enable/disable using EnabledBreakpoints
+-- ============================================================================
+
+function test_Breakpoint_dynamic_enable_disable()
+    print("\n--- Running test_Breakpoint_dynamic_enable_disable ---")
+    resetState()
+    
+    -- Enable interpreter
+    GameStatus = GAME_STATUS_OFFLINE
+    bj_isSinglePlayer = true
+    TryInterpret(0.01)
+    
+    local testComplete = false
+    
+    -- Create a coroutine that hits a dynamic breakpoint
+    local co = coroutine.create(function()
+        Breakpoint("dynamic_test", {status = "testing"})
+        testComplete = true
+    end)
+    
+    -- Start the coroutine
+    coroutine.resume(co)
+    
+    -- Advance time to let the breakpoint trigger
+    TriggerSleepAction(0.1)
+    
+    -- Find the breakpoint
+    local threadId, bpData = findThreadWithBreakpoint("dynamic_test")
+    Debug.assert(threadId ~= nil, "Should find thread in dynamic_test breakpoint")
+    Debug.assert(bpData ~= nil, "Breakpoint data file should exist for dynamic_test")
+    Debug.assert(bpData.bp_id == "dynamic_test", "bp_id should be 'dynamic_test'")
+    Debug.assert(bpData.locals_values["status"] == "testing", 
+        "status should be 'testing', got: " .. tostring(bpData.locals_values["status"]))
+    
+    -- Test: Disable the breakpoint dynamically using EnabledBreakpoints
+    local cmdIdx = bpCommandIndices[threadId] or 0
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "EnabledBreakpoints.dynamic_test = false")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()  -- Resume breakpoint coroutine once to process command
+    
+    -- Verify the breakpoint is now disabled
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "return EnabledBreakpoints.dynamic_test")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()  -- Resume breakpoint coroutine once to process command
+    
+    -- Note: bp_out.txt is saved with isLoadable=false, so we use getRawFileContent
+    local bpOutContent = getRawFileContent("Interpreter\\bp_out.txt")
+    local outIndex, outResult = bpOutContent:match("^([^\n]+)\n(.*)$")
+    Debug.assert(outResult == "false", "EnabledBreakpoints.dynamic_test should be false, got: " .. tostring(outResult))
+    
+    -- Continue from breakpoint
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "continue")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.6)
+    resumeOneCoroutine()  -- Resume breakpoint coroutine once to process continue
+    
+    -- Verify test completed
+    Debug.assert(testComplete, "Test function should have completed after continue")
+    
+    -- Verify the breakpoint is still disabled (persists after continue)
+    Debug.assert(EnabledBreakpoints["dynamic_test"] == false, "dynamic_test should remain disabled")
+    
+    print("--- test_Breakpoint_dynamic_enable_disable completed ---")
+end
+
+-- ============================================================================
+-- Test conditional breakpoint with false condition (should not trigger)
+-- ============================================================================
+
+function test_Breakpoint_conditional_false()
+    print("\n--- Running test_Breakpoint_conditional_false ---")
+    resetState()
+    
+    -- Enable interpreter
+    GameStatus = GAME_STATUS_OFFLINE
+    bj_isSinglePlayer = true
+    TryInterpret(0.01)
+    
+    local testComplete = false
+    
+    -- Create a coroutine that hits a conditional breakpoint that should NOT trigger
+    local co = coroutine.create(function()
+        local gold = 400  -- Less than 500, so condition should be false
+        Breakpoint("conditional_false_test", {gold = gold}, "return gold > 500")
+        testComplete = true
+    end)
+    
+    -- Start the coroutine
+    coroutine.resume(co)
+    
+    -- Advance time - the coroutine should complete immediately since condition is false
+    TriggerSleepAction(0.2)
+    
+    -- The breakpoint should NOT have triggered because gold (400) is not > 500
+    local threadId, bpData = findThreadWithBreakpoint("conditional_false_test")
+    Debug.assert(threadId == nil, "conditional_false_test should NOT trigger (gold=400 < 500)")
+    
+    -- The test should have completed without blocking
+    Debug.assert(testComplete, "Test should complete without blocking on false condition")
+    
+    print("--- test_Breakpoint_conditional_false completed ---")
+end
+
+-- ============================================================================
 -- Run all tests
 -- ============================================================================
 
@@ -687,6 +957,12 @@ test_Breakpoint_shows_local_variables()
 test_Breakpoint_output_format_without_locals()
 test_createBreakpointEnv_includes_globals()
 test_Breakpoint_error_handling_in_condition()
+
+-- Comprehensive breakpoint tests (each scenario tested separately)
+test_Breakpoint_basic_with_locals()
+test_Breakpoint_conditional_true()
+test_Breakpoint_conditional_false()
+test_Breakpoint_dynamic_enable_disable()
 
 print("\n============================================================")
 print("ALL LIVECODING TESTS PASSED!")

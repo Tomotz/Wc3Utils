@@ -215,17 +215,18 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
         EnabledBreakpoints[breakpointId] = (startsEnabled == nil) or startsEnabled
     end
     if EnabledBreakpoints[breakpointId] == false then return end
+    
+    -- Create environment with locals and globals accessible
+    local env = createBreakpointEnv(localVariables)
+    
     if condition then
-        local cond = load(condition)
+        local cond = load(condition, "breakpoint_condition", "t", env)
         if cond == nil then
             if Debug then Debug.throwError("error executing breakpoint condition") end
             return
         end
         if not cond() then return end
     end
-
-    -- Create environment with locals and globals accessible
-    local env = createBreakpointEnv(localVariables)
 
     -- Get thread ID and register this breakpoint
     local threadId = getThreadId()
