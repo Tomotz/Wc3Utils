@@ -1,6 +1,6 @@
 
 # wc3_interpreter.py
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 import os
 import re
@@ -10,6 +10,7 @@ import sys
 import traceback
 import threading
 from typing import Optional
+from queue import Queue, Empty
 
 # Optional watchdog import for file watching functionality
 try:
@@ -94,6 +95,13 @@ end"""
 # Global state for file watching
 watched_files = {}  # filepath -> Observer
 file_watch_lock = threading.Lock()
+
+# Global state for breakpoint handling
+breakpoint_queue = Queue()  # Queue for breakpoint notifications
+nextBpFile = 0  # Tracks the current breakpoint file index
+bp_monitor_thread = None  # Background thread for monitoring breakpoints
+bp_monitor_stop_event = threading.Event()  # Event to signal thread to stop
+in_breakpoint_mode = False  # Flag to indicate if we're in breakpoint mode
 
 class FileChangeHandler(FileSystemEventHandler):
     """Handler for file change events that sends the file to the game"""
@@ -295,14 +303,119 @@ def remove_all_files():
         return
     for filename in os.listdir(FILES_ROOT):
         file_path = os.path.join(FILES_ROOT, filename)
-        if (filename.startswith("in") or filename.startswith("out")) and filename.endswith(".txt") and os.path.isfile(file_path):
-            try:
-                os.unlink(file_path)
-            except Exception as e:
-                print(f"Error deleting file {file_path}: {e}")
+        # Remove regular files and breakpoint files
+        if filename.endswith(".txt") and os.path.isfile(file_path):
+            if (filename.startswith("in") or filename.startswith("out") or 
+                filename.startswith("bp_in") or filename.startswith("out_bp")):
+                try:
+                    os.unlink(file_path)
+                except Exception as e:
+                    print(f"Error deleting file {file_path}: {e}")
+
+
+def check_for_breakpoint():
+    """Check if a breakpoint output file exists and return its content if so."""
+    global nextBpFile
+    bp_file = FILES_ROOT + f"out_bp{nextBpFile}.txt"
+    if os.path.exists(bp_file):
+        content = load_file(bp_file)
+        if content:
+            return content.decode('utf-8') if isinstance(content, bytes) else content
+    return None
+
+
+def send_breakpoint_command(command: str):
+    """Send a command to the game during breakpoint mode."""
+    global nextBpFile
+    create_file(FILES_ROOT + f"bp_in{nextBpFile}.txt", command)
+    nextBpFile += 1
+
+
+def wait_for_breakpoint_response(timeout: float = 30.0) -> Optional[str]:
+    """Wait for a response from the game after sending a breakpoint command."""
+    global nextBpFile
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        bp_file = FILES_ROOT + f"out_bp{nextBpFile}.txt"
+        if os.path.exists(bp_file):
+            content = load_file(bp_file)
+            if content:
+                return content.decode('utf-8') if isinstance(content, bytes) else content
+        time.sleep(0.1)
+    return None
+
+
+def breakpoint_monitor_thread():
+    """Background thread that monitors for breakpoint files."""
+    global nextBpFile
+    while not bp_monitor_stop_event.is_set():
+        content = check_for_breakpoint()
+        if content:
+            breakpoint_queue.put(content)
+            # Wait until breakpoint is handled before checking for more
+            while not breakpoint_queue.empty() and not bp_monitor_stop_event.is_set():
+                time.sleep(0.1)
+        time.sleep(0.2)  # Check every 200ms
+
+
+def start_breakpoint_monitor():
+    """Start the background breakpoint monitoring thread."""
+    global bp_monitor_thread
+    if bp_monitor_thread is not None and bp_monitor_thread.is_alive():
+        return
+    bp_monitor_stop_event.clear()
+    bp_monitor_thread = threading.Thread(target=breakpoint_monitor_thread, daemon=True)
+    bp_monitor_thread.start()
+
+
+def stop_breakpoint_monitor():
+    """Stop the background breakpoint monitoring thread."""
+    global bp_monitor_thread
+    bp_monitor_stop_event.set()
+    if bp_monitor_thread is not None:
+        bp_monitor_thread.join(timeout=1.0)
+        bp_monitor_thread = None
+
+
+def handle_breakpoint_mode():
+    """Handle breakpoint mode - allows user to interact with the breakpoint."""
+    global nextBpFile, in_breakpoint_mode
+    in_breakpoint_mode = True
+    
+    print("\n" + "=" * 60)
+    print("BREAKPOINT MODE - Type 'continue' to resume execution")
+    print("You can run Lua commands to inspect/modify variables")
+    print("=" * 60)
+    
+    while True:
+        try:
+            command = input(f"bp:{nextBpFile} >>> ")
+        except EOFError:
+            break
+        
+        if command.strip() == "":
+            continue
+        
+        # Send command to game
+        send_breakpoint_command(command)
+        
+        if command.strip() == "continue":
+            print("Resuming execution...")
+            in_breakpoint_mode = False
+            return
+        
+        # Wait for response
+        response = wait_for_breakpoint_response()
+        if response:
+            print(response)
+        else:
+            print("(no response or timeout)")
+    
+    in_breakpoint_mode = False
 
 def signal_handler(sig, frame):
     """On any termination of the program we want to remove the input and output files and stop watchers"""
+    stop_breakpoint_monitor()
     stop_all_watchers()
     remove_all_files()
     sys.exit(0)
@@ -351,7 +464,7 @@ def send_file_to_game(filepath: str):
     send_data_to_game(data, print_prompt_after=True)
 
 def main():
-    global nextFile
+    global nextFile, nextBpFile
     remove_all_files()
     # add a signal handler that handles all signals by removing all files and calling the default handler
 
@@ -361,8 +474,20 @@ def main():
     signal.signal(signal.SIGSEGV, signal_handler)
     signal.signal(signal.SIGILL, signal_handler)
 
+    # Start the breakpoint monitor thread
+    start_breakpoint_monitor()
+
     print(f"Wc3 Interpreter {VERSION}. For help, type `help`.")
     while True:
+        # Check for pending breakpoints before getting input
+        try:
+            bp_content = breakpoint_queue.get_nowait()
+            print(f"\n{bp_content}")
+            handle_breakpoint_mode()
+            continue
+        except Empty:
+            pass
+        
         # get console input
         try:
             command = input(str(nextFile) + " >>> ")
@@ -370,6 +495,7 @@ def main():
             break
         
         if command == "exit":
+            stop_breakpoint_monitor()
             stop_all_watchers()
             remove_all_files()
             break
@@ -386,11 +512,17 @@ def main():
             print("  <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.")
             print("** Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **")
             print("** Note: OnInit calls in files sent via 'file' or 'watch' are automatically executed immediately **")
+            print("\nBreakpoint support:")
+            print("  When a Breakpoint() is hit in your Lua code, the interpreter will enter breakpoint mode.")
+            print("  In breakpoint mode, you can inspect/modify variables and type 'continue' to resume.")
             continue
         elif command == "restart":
+            stop_breakpoint_monitor()
             stop_all_watchers()
             remove_all_files()
             nextFile = 0
+            nextBpFile = 0
+            start_breakpoint_monitor()
             print("State reset. You can start a new game now.")
             continue
         elif command.startswith("jump "):
