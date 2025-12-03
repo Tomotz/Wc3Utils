@@ -433,6 +433,12 @@ end
 -- File System (Preload/Preloader)
 -- ============================================================================
 
+-- Optional: Set this global to a directory path to mirror file writes to real OS files.
+-- Used by E2E tests where Python needs to read files written by Lua.
+-- Default is nil (no mirroring). Only set this in test environments.
+---@type string?
+MOCK_FILE_MIRROR_ROOT = MOCK_FILE_MIRROR_ROOT or nil
+
 ---@type table<string, string>
 local fileSystem = {}
 
@@ -465,12 +471,49 @@ function PreloadGenEnd(filename)
             -- File was saved with isLoadable=false, store raw content
             rawFileSystem[filename] = content
         end
+        
+        -- Mirror to real OS files if MOCK_FILE_MIRROR_ROOT is set (for E2E tests)
+        if MOCK_FILE_MIRROR_ROOT then
+            pcall(function()
+                -- Normalize path separators (WC3 uses backslashes, OS may use forward slashes)
+                local normalized = filename:gsub("\\", "/")
+                local full = MOCK_FILE_MIRROR_ROOT .. normalized
+                -- Create parent directory if needed
+                local dir = full:match("^(.*)/[^/]+$")
+                if dir then
+                    os.execute('mkdir -p "' .. dir .. '"')
+                end
+                local f = io.open(full, "wb")
+                if f then
+                    f:write(content)
+                    f:close()
+                end
+            end)
+        end
     end
 end
 
 ---@param filename string
 function Preloader(filename)
     local content = fileSystem[filename]
+    
+    -- If MOCK_FILE_MIRROR_ROOT is set and file not in memory, try to read from disk
+    if not content and MOCK_FILE_MIRROR_ROOT then
+        pcall(function()
+            local normalized = filename:gsub("\\", "/")
+            local full = MOCK_FILE_MIRROR_ROOT .. normalized
+            local f = io.open(full, "rb")
+            if f then
+                content = f:read("*all")
+                f:close()
+                -- Store in memory for future access
+                if content then
+                    fileSystem[filename] = content
+                end
+            end
+        end)
+    end
+    
     if content then
         local startMarker = "//!beginusercode\n"
         local endMarker = "\n//!endusercode"
@@ -506,7 +549,22 @@ end
 ---@param filename string
 ---@return string?
 function getRawFileContent(filename)
-    return rawFileSystem[filename]
+    local content = rawFileSystem[filename]
+    
+    -- If MOCK_FILE_MIRROR_ROOT is set and file not in memory, try to read from disk
+    if not content and MOCK_FILE_MIRROR_ROOT then
+        pcall(function()
+            local normalized = filename:gsub("\\", "/")
+            local full = MOCK_FILE_MIRROR_ROOT .. normalized
+            local f = io.open(full, "rb")
+            if f then
+                content = f:read("*all")
+                f:close()
+            end
+        end)
+    end
+    
+    return content
 end
 
 ---Clear a file from the mock file system

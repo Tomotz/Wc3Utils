@@ -37,7 +37,14 @@ CUSTOM_MAP_DATA_PATH = r"D:\Users\{username}\Documents\Warcraft III\CustomMapDat
 if os.path.exists("/mnt/d/Users/"):
     CUSTOM_MAP_DATA_PATH = "/mnt/d/Users/Tom/Documents/Warcraft III/CustomMapData/"
 
-FILES_ROOT = os.path.join(CUSTOM_MAP_DATA_PATH, "Interpreter") # This should match the folder defined in the lua code
+# Allow overriding FILES_ROOT via environment variable for testing
+FILES_ROOT = os.environ.get('WC3_INTERPRETER_FILES_ROOT', os.path.join(CUSTOM_MAP_DATA_PATH, "Interpreter"))
+
+def set_files_root(path: str) -> None:
+    """Set the FILES_ROOT directory. Useful for testing with a temp directory."""
+    global FILES_ROOT
+    FILES_ROOT = path
+    os.makedirs(FILES_ROOT, exist_ok=True)
 
 # find any pattern starting with `call Preload( "]]i([[` and ending with `]])--[[" )` and concatenate the innter strings
 REGEX_PATTERN = rb'call Preload\( "\]\]i\(\[\[(.*?)\]\]\)--\[\[" \)'
@@ -357,12 +364,29 @@ def parse_indexed_output(content: bytes) -> Tuple[Optional[bytes], Optional[byte
     return None, None
 
 
+def load_nonloadable_file(filename: str) -> Optional[bytes]:
+    """Read payload from files saved via FileIO.Save(..., isLoadable=False) in the test environment.
+
+    In WC3, these files still go through the Preload mechanism but don't contain the markers
+    used by load_file(). In our Lua test harness, FileIO mocks mirror the escaped payload
+    directly to disk via FILEIO_MIRROR_ROOT, and we read it as-is here.
+
+    This function is used for breakpoint metadata files (bp_threads.txt, bp_data_*.txt, bp_out.txt)
+    which are saved with isLoadable=False by LiveCoding.lua.
+    """
+    if not os.path.exists(filename):
+        return None
+    with open(filename, 'rb') as file:
+        return file.read()
+
+
 def get_breakpoint_threads() -> List[bytes]:
     """Get list of thread IDs currently in a breakpoint by reading bp_threads.txt."""
     bp_threads_file = os.path.join(FILES_ROOT, "bp_threads.txt")
     if not os.path.exists(bp_threads_file):
         return []
-    content = load_file(bp_threads_file)
+    # Breakpoint metadata files are saved with isLoadable=False and mirrored to disk by the test harness
+    content = load_nonloadable_file(bp_threads_file)
     if not content:
         return []
     if not content.strip():
@@ -387,7 +411,8 @@ def get_breakpoint_info(thread_id: str) -> Optional[Dict[str, any]]:
     bp_data_file = os.path.join(FILES_ROOT, f"bp_data_{thread_id}.txt")
     if not os.path.exists(bp_data_file):
         return None
-    content = load_file(bp_data_file)
+    # Breakpoint metadata files are saved with isLoadable=False and mirrored to disk by the test harness
+    content = load_nonloadable_file(bp_data_file)
     if not content:
         return None
     content_str = content
@@ -486,10 +511,11 @@ def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
     while time.time() - start_time < timeout:
         bp_out_file = os.path.join(FILES_ROOT, "bp_out.txt")
         if os.path.exists(bp_out_file):
-            content = load_file(bp_out_file)
+            # Breakpoint output files are saved with isLoadable=False and mirrored to disk by the test harness
+            content = load_nonloadable_file(bp_out_file)
             if content:
                 index, result = parse_indexed_output(content)
-                if index == expected_prefix:
+                if index and index.decode('utf-8', errors='replace') == expected_prefix:
                     bp_command_indices[thread_id] = cmd_index + 1
                     return result.decode('utf-8', errors='replace') if result else None
         time.sleep(0.1)
