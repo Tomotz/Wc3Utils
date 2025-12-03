@@ -89,9 +89,13 @@ function test_TryInterpret_disabled_in_multiplayer()
     -- Advance time to trigger the timer (which calls CheckFiles)
     TriggerSleepAction(0.02)
     
-    -- The output file should not exist because the interpreter is disabled
-    local result = FileIO.Load("Interpreter\\out" .. fileIdx .. ".txt")
-    Debug.assert(result == nil, "Expected no output in multiplayer, got: " .. tostring(result))
+        -- The output file should not exist or not have the expected index because the interpreter is disabled
+        local result = FileIO.Load("Interpreter\\out.txt")
+        -- Either no file exists, or the index doesn't match (meaning our command wasn't processed)
+        if result then
+            local index = result:match("^(%d+)\n")
+            Debug.assert(index ~= tostring(fileIdx), "Expected no output in multiplayer for index " .. fileIdx .. ", got index: " .. tostring(index))
+        end
     
     -- Decrement file index since the command was not processed
     currentFileIndex = currentFileIndex - 1
@@ -117,9 +121,12 @@ function test_TryInterpret_enabled_in_singleplayer()
     -- Advance time to trigger the timer (which calls CheckFiles)
     TriggerSleepAction(0.02)
     
-    -- The output file should exist with the result
-    local result = FileIO.Load("Interpreter\\out" .. fileIdx .. ".txt")
-    Debug.assert(result == "executed", "Expected 'executed', got: " .. tostring(result))
+    -- The output file should exist with the result in new format: "index\nresult"
+    local result = FileIO.Load("Interpreter\\out.txt")
+    Debug.assert(result ~= nil, "Output file should exist")
+    local index, value = result:match("^(%d+)\n(.*)$")
+    Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
+    Debug.assert(value == "executed", "Expected 'executed', got: " .. tostring(value))
     
     print("--- test_TryInterpret_enabled_in_singleplayer completed ---")
 end
@@ -142,9 +149,12 @@ function test_TryInterpret_enabled_in_replay()
     -- Advance time to trigger the timer (which calls CheckFiles)
     TriggerSleepAction(0.02)
     
-    -- The output file should exist with the result
-    local result = FileIO.Load("Interpreter\\out" .. fileIdx .. ".txt")
-    Debug.assert(result == "replay_executed", "Expected 'replay_executed', got: " .. tostring(result))
+    -- The output file should exist with the result in new format: "index\nresult"
+    local result = FileIO.Load("Interpreter\\out.txt")
+    Debug.assert(result ~= nil, "Output file should exist")
+    local index, value = result:match("^(%d+)\n(.*)$")
+    Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
+    Debug.assert(value == "replay_executed", "Expected 'replay_executed', got: " .. tostring(value))
     
     print("--- test_TryInterpret_enabled_in_replay completed ---")
 end
@@ -201,9 +211,12 @@ function test_CheckFiles_handles_return_value()
     -- Advance time to trigger the timer (which calls CheckFiles)
     TriggerSleepAction(0.02)
     
-    -- Verify the output file contains the return value
-    local result = FileIO.Load("Interpreter\\out" .. fileIdx .. ".txt")
-    Debug.assert(result == "42", "Expected '42', got: " .. tostring(result))
+    -- Verify the output file contains the return value in new format: "index\nresult"
+    local result = FileIO.Load("Interpreter\\out.txt")
+    Debug.assert(result ~= nil, "Output file should exist")
+    local index, value = result:match("^(%d+)\n(.*)$")
+    Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
+    Debug.assert(value == "42", "Expected '42', got: " .. tostring(value))
     
     print("--- test_CheckFiles_handles_return_value completed ---")
 end
@@ -226,9 +239,12 @@ function test_CheckFiles_handles_nil_return()
     -- Advance time to trigger the timer (which calls CheckFiles)
     TriggerSleepAction(0.02)
     
-    -- Verify the output file contains "nil"
-    local result = FileIO.Load("Interpreter\\out" .. fileIdx .. ".txt")
-    Debug.assert(result == "nil", "Expected 'nil', got: " .. tostring(result))
+    -- Verify the output file contains "nil" in new format: "index\nresult"
+    local result = FileIO.Load("Interpreter\\out.txt")
+    Debug.assert(result ~= nil, "Output file should exist")
+    local index, value = result:match("^(%d+)\n(.*)$")
+    Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
+    Debug.assert(value == "nil", "Expected 'nil', got: " .. tostring(value))
     
     print("--- test_CheckFiles_handles_nil_return completed ---")
 end
@@ -251,8 +267,11 @@ function test_CheckFiles_sequential_commands()
     -- Advance time to trigger the timer (which calls CheckFiles)
     TriggerSleepAction(0.02)
     
-    local result1 = FileIO.Load("Interpreter\\out" .. fileIdx1 .. ".txt")
-    Debug.assert(result1 == "first", "Expected 'first', got: " .. tostring(result1))
+    local result1 = FileIO.Load("Interpreter\\out.txt")
+    Debug.assert(result1 ~= nil, "Output file should exist")
+    local index1, value1 = result1:match("^(%d+)\n(.*)$")
+    Debug.assert(index1 == tostring(fileIdx1), "Expected index " .. fileIdx1 .. ", got: " .. tostring(index1))
+    Debug.assert(value1 == "first", "Expected 'first', got: " .. tostring(value1))
     
     -- Save second command
     local fileIdx2 = getNextFileIndex()
@@ -262,8 +281,11 @@ function test_CheckFiles_sequential_commands()
     -- Note: After finding a command, CheckFiles reschedules with 0.1s period, so we need to wait at least that long
     TriggerSleepAction(0.2)
     
-    local result2 = FileIO.Load("Interpreter\\out" .. fileIdx2 .. ".txt")
-    Debug.assert(result2 == "second", "Expected 'second', got: " .. tostring(result2))
+    local result2 = FileIO.Load("Interpreter\\out.txt")
+    Debug.assert(result2 ~= nil, "Output file should exist")
+    local index2, value2 = result2:match("^(%d+)\n(.*)$")
+    Debug.assert(index2 == tostring(fileIdx2), "Expected index " .. fileIdx2 .. ", got: " .. tostring(index2))
+    Debug.assert(value2 == "second", "Expected 'second', got: " .. tostring(value2))
     
     print("--- test_CheckFiles_sequential_commands completed ---")
 end
@@ -382,14 +404,57 @@ function test_Breakpoint_not_yieldable()
     print("--- test_Breakpoint_not_yieldable completed ---")
 end
 
--- Helper to find the latest breakpoint output file that matches a pattern
--- Returns the file index and content, or nil if not found
-local function findLatestBpOutput(pattern)
-    -- Search for breakpoint output files (check up to 100 indices)
-    for i = 99, 0, -1 do
-        local content = FileIO.Load("Interpreter\\out_bp" .. i .. ".txt")
-        if content and (not pattern or content:find(pattern)) then
-            return i, content
+-- Helper to get the list of threads currently in a breakpoint
+local function getBreakpointThreads()
+    local content = FileIO.Load("Interpreter\\bp_threads.txt")
+    if not content or content == "" then
+        return {}
+    end
+    local threads = {}
+    for thread in content:gmatch("[^\n]+") do
+        table.insert(threads, thread)
+    end
+    return threads
+end
+
+-- Helper to get breakpoint data for a specific thread
+-- Returns a table with bp_id, locals (list), stack, and locals_values (table)
+local function getBreakpointData(threadId)
+    local content = FileIO.Load("Interpreter\\bp_data_" .. threadId .. ".txt")
+    if not content then
+        return nil
+    end
+    local data = {locals_values = {}}
+    for line in content:gmatch("[^\n]+") do
+        if line:match("^bp_id:") then
+            data.bp_id = line:sub(7)
+        elseif line:match("^locals:") then
+            local localsStr = line:sub(8)
+            data.locals = {}
+            if localsStr ~= "" then
+                for var in localsStr:gmatch("[^,]+") do
+                    table.insert(data.locals, var)
+                end
+            end
+        elseif line:match("^stack:") then
+            data.stack = line:sub(7):gsub("\\n", "\n")
+        elseif line:match("=") then
+            local key, value = line:match("^([^=]+)=(.*)$")
+            if key then
+                data.locals_values[key] = value
+            end
+        end
+    end
+    return data
+end
+
+-- Helper to find a thread with a specific breakpoint ID
+local function findThreadWithBreakpoint(bpId)
+    local threads = getBreakpointThreads()
+    for _, threadId in ipairs(threads) do
+        local data = getBreakpointData(threadId)
+        if data and data.bp_id == bpId then
+            return threadId, data
         end
     end
     return nil, nil
@@ -420,18 +485,31 @@ function test_Breakpoint_shows_local_variables()
     -- Advance time to let the breakpoint write its output
     TriggerSleepAction(0.1)
     
-    -- Find the breakpoint output file
-    local bpFileIdx, bpOutput = findLatestBpOutput("BREAKPOINT_HIT:test_bp_locals")
-    Debug.assert(bpOutput ~= nil, "Breakpoint output file should exist")
-    Debug.assert(bpOutput:find("Local variables:") ~= nil, 
-        "Output should list local variables, got: " .. tostring(bpOutput))
-    Debug.assert(bpOutput:find("myVar") ~= nil, 
-        "Output should mention myVar, got: " .. tostring(bpOutput))
-    Debug.assert(bpOutput:find("myString") ~= nil, 
-        "Output should mention myString, got: " .. tostring(bpOutput))
+    -- Find the thread with our breakpoint using new file format
+    local threadId, bpData = findThreadWithBreakpoint("test_bp_locals")
+    Debug.assert(threadId ~= nil, "Should find thread in breakpoint")
+    Debug.assert(bpData ~= nil, "Breakpoint data file should exist")
+    Debug.assert(bpData.bp_id == "test_bp_locals", "bp_id should match")
+    Debug.assert(bpData.locals ~= nil, "Should have locals list")
     
-    -- Send continue command to resume execution
-    FileIO.Save("Interpreter\\bp_in" .. bpFileIdx .. ".txt", "continue")
+    -- Check that local variables are listed
+    local hasMyVar = false
+    local hasMyString = false
+    for _, var in ipairs(bpData.locals or {}) do
+        if var == "myVar" then hasMyVar = true end
+        if var == "myString" then hasMyString = true end
+    end
+    Debug.assert(hasMyVar, "Output should list myVar")
+    Debug.assert(hasMyString, "Output should list myString")
+    
+    -- Check local variable values
+    Debug.assert(bpData.locals_values["myVar"] == "42", 
+        "myVar should be 42, got: " .. tostring(bpData.locals_values["myVar"]))
+    Debug.assert(bpData.locals_values["myString"] == "hello", 
+        "myString should be 'hello', got: " .. tostring(bpData.locals_values["myString"]))
+    
+    -- Send continue command to resume execution using new format: thread_id:cmd_index:command
+    FileIO.Save("Interpreter\\bp_in.txt", threadId .. ":0:continue")
     
     -- Advance time to let the breakpoint process the continue command
     TriggerSleepAction(0.6)
@@ -464,17 +542,17 @@ function test_Breakpoint_output_format_without_locals()
     -- Advance time to let the breakpoint write its output
     TriggerSleepAction(0.1)
     
-    -- Find the breakpoint output file
-    local bpFileIdx, bpOutput = findLatestBpOutput("BREAKPOINT_HIT:test_bp_no_locals")
-    Debug.assert(bpOutput ~= nil, "Breakpoint output file should exist")
-    Debug.assert(bpOutput:find("BREAKPOINT_HIT:test_bp_no_locals") ~= nil, 
-        "Output should contain breakpoint ID, got: " .. tostring(bpOutput))
-    -- Without local variables, should not have "Local variables:" line
-    Debug.assert(bpOutput:find("Local variables:") == nil, 
-        "Output should NOT list local variables when none provided, got: " .. tostring(bpOutput))
+    -- Find the thread with our breakpoint using new file format
+    local threadId, bpData = findThreadWithBreakpoint("test_bp_no_locals")
+    Debug.assert(threadId ~= nil, "Should find thread in breakpoint")
+    Debug.assert(bpData ~= nil, "Breakpoint data file should exist")
+    Debug.assert(bpData.bp_id == "test_bp_no_locals", "bp_id should match")
+    -- Without local variables, locals list should be empty
+    Debug.assert(bpData.locals ~= nil and #bpData.locals == 0, 
+        "Output should have empty locals list when none provided")
     
-    -- Send continue command to clean up
-    FileIO.Save("Interpreter\\bp_in" .. bpFileIdx .. ".txt", "continue")
+    -- Send continue command to clean up using new format
+    FileIO.Save("Interpreter\\bp_in.txt", threadId .. ":0:continue")
     TriggerSleepAction(0.6)
     processTimersAndCoroutines()
     
