@@ -452,6 +452,30 @@ endfunction'''
         finally:
             os.unlink(temp_path)
 
+    def test_load_nonloadable_file_with_double_quotes_in_payload(self):
+        """Test that load_nonloadable_file correctly handles double quotes inside the payload.
+        
+        In JASS/WC3, double quotes inside strings are represented as "" (doubled quotes).
+        The regex pattern should match these and include them in the payload.
+        """
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            # Create content with doubled quotes inside the payload
+            content = '''function PreloadFiles takes nothing returns nothing
+
+\tcall PreloadStart()
+\tcall Preload( "He said ""hello"" to me" )
+\tcall PreloadEnd( 0.0 )
+
+endfunction'''
+            f.write(content)
+            temp_path = f.name
+        try:
+            result = load_nonloadable_file(temp_path)
+            # The doubled quotes should be preserved in the payload
+            self.assertEqual(result, b'He said ""hello"" to me')
+        finally:
+            os.unlink(temp_path)
+
 
 @contextmanager
 def mock_main_environment(commands, capture_print=False, track_calls=False):

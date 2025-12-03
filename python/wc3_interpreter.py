@@ -389,8 +389,10 @@ def load_nonloadable_file(filename: str) -> Optional[bytes]:
         content = file.read()
     
     # Parse the preload wrapper and extract payload from call Preload( "..." ) lines
-    # Pattern matches: call Preload( "..." )
-    pattern = rb'call Preload\( "([^"]*)" \)'
+    # Pattern matches: call Preload( "..." ) and allows double quotes inside the payload
+    # The pattern ((?:""|[^"])*) matches either doubled quotes "" or non-quote chars,
+    # stopping only at the closing " ) sequence
+    pattern = rb'call Preload\( "((?:""|[^"])*)" \)'
     matches = re.findall(pattern, content)
     if matches:
         return b''.join(matches)

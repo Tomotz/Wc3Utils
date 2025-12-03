@@ -561,15 +561,43 @@ function Preloader(filename)
 end
 
 ---Parse nonloadable file content and extract the payload from preload wrapper
+---Handles payloads with newlines and doubled quotes ("") inside
 ---@param content string -- The raw file content with preload wrapper
 ---@return string? -- The extracted payload, or nil if parsing fails
 local function parseNonloadableContent(content)
     if not content then return nil end
-    -- Extract content from call Preload( "..." ) lines and concatenate
     local payload = {}
-    for chunk in content:gmatch('call Preload%( "([^"]*)" %)') do
-        table.insert(payload, chunk)
+    local pos = 1
+    while true do
+        -- Find the start of a Preload call and the opening quote
+        local callStart, quoteStart = content:find('call Preload%(%s*"', pos)
+        if not callStart then break end
+
+        local i = quoteStart + 1
+        local buf = {}
+
+        while i <= #content do
+            local c = content:sub(i, i)
+            if c == '"' then
+                local nextc = content:sub(i + 1, i + 1)
+                if nextc == '"' then
+                    -- Doubled quote inside the string, keep both quotes
+                    table.insert(buf, '""')
+                    i = i + 2
+                else
+                    -- This is the closing quote before the ` )`
+                    break
+                end
+            else
+                table.insert(buf, c)
+                i = i + 1
+            end
+        end
+
+        table.insert(payload, table.concat(buf))
+        pos = i + 1
     end
+
     if #payload > 0 then
         return table.concat(payload)
     end
