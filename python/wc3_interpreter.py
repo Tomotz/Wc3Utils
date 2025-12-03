@@ -316,12 +316,12 @@ def create_file(filename: str, content) -> None:
         content_bytes = content.encode('utf-8')
     else:
         content_bytes = content
-    
+
     # Build the file content as bytes
     data = FILE_PREFIX.encode('utf-8')
     line_prefix_bytes = LINE_PREFIX.encode('utf-8')
     line_postfix_bytes = LINE_POSTFIX.encode('utf-8')
-    
+
     # Split content into 255 byte chunks
     for i in range(0, len(content_bytes), 255):
         chunk = content_bytes[i : i+255]
@@ -506,7 +506,7 @@ def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
     # Wait for response in bp_out.txt
     expected_prefix = f"{thread_id}:{cmd_index}"
     start_time = time.time()
-    timeout = 30.0
+    timeout = 15
 
     while time.time() - start_time < timeout:
         bp_out_file = os.path.join(FILES_ROOT, "bp_out.txt")
@@ -520,6 +520,7 @@ def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
                     return result.decode('utf-8', errors='replace') if result else None
         time.sleep(0.1)
 
+    assert(time.time() - start_time < timeout)
     return None
 
 

@@ -1,9 +1,9 @@
 --[[
     WC3 Native Function Mocks for Standalone Testing
-    
+
     This file provides mock implementations of WC3-specific functions and globals
     to allow testing WC3 Lua libraries in a standard Lua environment.
-    
+
     Mocked systems:
     - Debug utilities
     - Logging functions
@@ -306,18 +306,18 @@ end
 ---@return boolean
 function BlzSendSyncData(prefix, data)
     local sender = GetLocalPlayer()
-    
+
     local handlers = syncEventHandlers[prefix]
     if handlers then
         for _, handler in ipairs(handlers) do
             if handler.trigger._enabled and handler.player == sender then
                 currentTriggerData.player = sender
                 currentTriggerData.syncData = data
-                
+
                 for _, action in ipairs(handler.trigger._actions) do
                     action()
                 end
-                
+
                 currentTriggerData.player = nil
                 currentTriggerData.syncData = nil
             end
@@ -340,9 +340,9 @@ local runningCoroutines = {}
 ---@param duration number
 function TriggerSleepAction(duration)
     local co, isMain = coroutine.running()
-    
+
     currentTime = currentTime + duration
-    
+
     for _, timer in ipairs(activeTimers) do
         while timer._active and timer._nextTrigger <= currentTime do
             -- Save the nextTrigger before callback in case callback reschedules
@@ -364,13 +364,13 @@ function TriggerSleepAction(duration)
             end
         end
     end
-    
+
     -- In Lua 5.3+, coroutine.running() returns (thread, isMain) where isMain is true for main thread
     -- Don't yield if we're in the main thread or not in a coroutine
     if not co or isMain then
         return
     end
-    
+
     table.insert(runningCoroutines, {co = co, resumeTime = currentTime})
     coroutine.yield()
 end
@@ -463,7 +463,7 @@ function PreloadGenEnd(filename)
         local content = table.concat(fileSystem._currentFile)
         fileSystem[filename] = content
         fileSystem._currentFile = nil
-        
+
         -- Also store raw content for files without //!beginusercode marker
         -- This handles files saved with isLoadable=false
         -- Extract raw content from Preload calls (content without the wrapper)
@@ -471,7 +471,7 @@ function PreloadGenEnd(filename)
             -- File was saved with isLoadable=false, store raw content
             rawFileSystem[filename] = content
         end
-        
+
         -- Mirror to real OS files if MOCK_FILE_MIRROR_ROOT is set (for E2E tests)
         if MOCK_FILE_MIRROR_ROOT then
             pcall(function()
@@ -496,7 +496,7 @@ end
 ---@param filename string
 function Preloader(filename)
     local content = fileSystem[filename]
-    
+
     -- If MOCK_FILE_MIRROR_ROOT is set and file not in memory, try to read from disk
     if not content and MOCK_FILE_MIRROR_ROOT then
         pcall(function()
@@ -513,16 +513,16 @@ function Preloader(filename)
             end
         end)
     end
-    
+
     if content then
         local startMarker = "//!beginusercode\n"
         local endMarker = "\n//!endusercode"
         local startPos = content:find(startMarker, 1, true)
         local endPos = content:find(endMarker, 1, true)
-        
+
         if startPos and endPos then
             local luaCode = content:sub(startPos + #startMarker, endPos - 1)
-            
+
             local env = {
                 BlzSetAbilityTooltip = BlzSetAbilityTooltip,
                 ANdc = FourCC('ANdc'),
@@ -550,7 +550,7 @@ end
 ---@return string?
 function getRawFileContent(filename)
     local content = rawFileSystem[filename]
-    
+
     -- If MOCK_FILE_MIRROR_ROOT is set and file not in memory, try to read from disk
     if not content and MOCK_FILE_MIRROR_ROOT then
         pcall(function()
@@ -559,11 +559,12 @@ function getRawFileContent(filename)
             local f = io.open(full, "rb")
             if f then
                 content = f:read("*all")
+                -- Remove the first 3 lines and last 6 lines, and
                 f:close()
             end
         end)
     end
-    
+
     return content
 end
 
@@ -635,7 +636,7 @@ function runAsyncTest(testName, testFunc)
     if not success then
         error("Test " .. testName .. " failed: " .. tostring(err))
     end
-    
+
     -- Process coroutines until the test coroutine is done
     -- Note: TriggerSleepAction now handles time advancement and timer processing
     local maxIterations = 10000
@@ -645,18 +646,18 @@ function runAsyncTest(testName, testFunc)
         if coroutine.status(co) ~= "dead" and getRunningCoroutineCount() == 0 then
             error("Test " .. testName .. " is stuck with no coroutines waiting")
         end
-        
+
         processTimersAndCoroutines()
         iterations = iterations + 1
     end
-    
+
     if iterations >= maxIterations then
         error("Test " .. testName .. " timed out after " .. maxIterations .. " iterations")
     end
-    
+
     -- Clean up any remaining coroutines after the test completes
     -- Note: Do NOT clear activeTimers as they may be needed by subsequent tests (e.g., SyncStream timer)
     clearRunningCoroutines()
-    
+
     print("--- " .. testName .. " completed ---")
 end

@@ -1,14 +1,14 @@
 #!/usr/bin/env lua
 --[[
     End-to-End Lua Test Harness for wc3_interpreter.py
-    
+
     This harness loads the REAL LiveCoding.lua and uses TestLib_mocks.lua to simulate
     the WC3 environment. It uses FILEIO_MIRROR_ROOT to write files to disk so that
     the Python interpreter can read them.
-    
+
     Usage:
         lua e2e_lua_harness.lua <files_root> <test_name>
-    
+
     The harness will:
     1. Load TestLib_mocks.lua for WC3 API simulation
     2. Set FILEIO_MIRROR_ROOT so FileIO.Save mirrors to real OS files
@@ -99,7 +99,7 @@ local testResults = {
 -- Test: Basic breakpoint with locals
 local function test_breakpoint_basic()
     print("Starting breakpoint_basic test...")
-    
+
     -- Create a coroutine that hits a breakpoint
     local testComplete = false
     local co = coroutine.create(function()
@@ -111,47 +111,47 @@ local function test_breakpoint_basic()
         print("Breakpoint continued!")
         testComplete = true
     end)
-    
+
     -- Start the coroutine
     print("Starting coroutine...")
     local success, err = coroutine.resume(co)
     if not success then
         error("Coroutine failed to start: " .. tostring(err))
     end
-    
+
     -- The coroutine should now be waiting at the breakpoint
     print("Coroutine started, waiting for Python to interact...")
-    
+
     -- Poll and process timers/coroutines until test completes or timeout
     -- Use processTimersAndCoroutines from TestLib_mocks.lua
-    local maxIterations = 600  -- 60 seconds at 0.1s per iteration
+    local maxIterations = 100  -- 10 seconds at 0.1s per iteration
     local iteration = 0
     while not testComplete and iteration < maxIterations do
         -- Advance time and process timers/coroutines
         TriggerSleepAction(0.1)
         processTimersAndCoroutines()
-        
+
         -- Check if coroutine is dead (test failed to complete)
         if coroutine.status(co) == "dead" and not testComplete then
             break
         end
-        
+
         -- Small sleep to avoid busy waiting (real time, not simulated)
         os.execute("sleep 0.1")
         iteration = iteration + 1
     end
-    
+
     if not testComplete then
         error("Test did not complete - breakpoint was not continued (iterations: " .. iteration .. ")")
     end
-    
+
     print("Test completed successfully!")
 end
 
 -- Test: Conditional breakpoint (true condition)
 local function test_breakpoint_conditional_true()
     print("Starting breakpoint_conditional_true test...")
-    
+
     local testComplete = false
     local co = coroutine.create(function()
         local gold = 600
@@ -161,15 +161,15 @@ local function test_breakpoint_conditional_true()
         print("Conditional breakpoint continued!")
         testComplete = true
     end)
-    
+
     local success, err = coroutine.resume(co)
     if not success then
         error("Coroutine failed to start: " .. tostring(err))
     end
-    
+
     print("Coroutine started, waiting for Python to interact...")
-    
-    local maxIterations = 600
+
+    local maxIterations = 100
     local iteration = 0
     while not testComplete and iteration < maxIterations do
         TriggerSleepAction(0.1)
@@ -180,18 +180,18 @@ local function test_breakpoint_conditional_true()
         os.execute("sleep 0.1")
         iteration = iteration + 1
     end
-    
+
     if not testComplete then
         error("Test did not complete - breakpoint was not continued")
     end
-    
+
     print("Test completed successfully!")
 end
 
 -- Test: Conditional breakpoint (false condition - should not block)
 local function test_breakpoint_conditional_false()
     print("Starting breakpoint_conditional_false test...")
-    
+
     local testComplete = false
     local co = coroutine.create(function()
         local gold = 400
@@ -201,27 +201,27 @@ local function test_breakpoint_conditional_false()
         print("Conditional breakpoint skipped (condition was false)!")
         testComplete = true
     end)
-    
+
     local success, err = coroutine.resume(co)
     if not success then
         error("Coroutine failed to start: " .. tostring(err))
     end
-    
+
     -- This should complete immediately since condition is false
     TriggerSleepAction(0.1)
     processTimersAndCoroutines()
-    
+
     if not testComplete then
         error("Test did not complete - conditional breakpoint should have been skipped")
     end
-    
+
     print("Test completed successfully!")
 end
 
 -- Test: Disabled breakpoint (should not block)
 local function test_breakpoint_disabled()
     print("Starting breakpoint_disabled test...")
-    
+
     local testComplete = false
     local co = coroutine.create(function()
         print("About to hit disabled breakpoint")
@@ -230,20 +230,20 @@ local function test_breakpoint_disabled()
         print("Disabled breakpoint skipped!")
         testComplete = true
     end)
-    
+
     local success, err = coroutine.resume(co)
     if not success then
         error("Coroutine failed to start: " .. tostring(err))
     end
-    
+
     -- This should complete immediately since breakpoint is disabled
     TriggerSleepAction(0.1)
     processTimersAndCoroutines()
-    
+
     if not testComplete then
         error("Test did not complete - disabled breakpoint should have been skipped")
     end
-    
+
     print("Test completed successfully!")
 end
 
