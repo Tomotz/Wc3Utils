@@ -1,6 +1,6 @@
 if Debug then Debug.beginFile("LiveCoding") end
 --[[
-Lua Live Coding v1.1.0 by Tomotz
+Lua Live Coding v1.2.0 by Tomotz
 This tool allows connecting to your game with an external cli, and run lua code in it - it allows you to open a windows terminal and run code inside your game. Works for single player and in replays
 
 Features:
@@ -9,6 +9,7 @@ Features:
  - Get command output in the terminal.
  - Run lua script files.
  - Run new code during replay and let you debug the replay.
+ - Breakpoint support with per-coroutine data files for debugging.
 Note that currently the interpreter does not support multiplayer (It will not run if there is more than one active player). Support for multiplayer can be added but will be a bit complicated since the backend files data needs to be synced. If I'll see a demand for the feature, I'll add it.
 
 Installation and usage instructions:
@@ -27,13 +28,17 @@ cli commands:
  - watch <full file path> - send a file to the game on each change. print the result just like `file`.
  - unwatch <full file path> - stop watching a file
  - watching - list all currently watched files
+ - bp list - list all threads currently in a breakpoint
+ - bp info <thread_id> - get breakpoint info for a specific thread
  - <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.
+Breakpoint mode:
+ When a Breakpoint() is hit, the interpreter enters breakpoint mode.
+ Commands: list, thread <id>, info, continue, help, and Lua code.
 * Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **
-Requires:
 
 Algorithm explanation:
-The lua code polls on the creation of new files with increasing indices (in0.txt, in1.txt, ...). When a new file is found, it reads the content, runs it as lua code, and saves the output to the corresponding outN.txt file.
-For each command you type in the cli, the python script creates a files in the wc3 preload format and reads and prints the output file returned.
+The lua code polls on the creation of new files with increasing indices (in0.txt, in1.txt, ...). When a new file is found, it reads the content, runs it as lua code, and saves the output to a single out.txt file with the command index.
+For breakpoints, each coroutine writes its data to a per-coroutine file (bp_data_<thread_id>.txt) and a shared metadata file (bp_threads.txt) lists all active breakpoint threads.
 
 Suggested usages:
  - Map Development - You created a new global function, you test your map and it doesn't do what you meant. You can now create a file with this function, edit what you wish, and run `file` command. The new function will run over the old one, and you can test it again without restarting wc3 and rebuilding the map.
@@ -67,12 +72,26 @@ local isDisabled ---@type boolean
 
 EnabledBreakpoints = {} ---@type table<string | integer, boolean> -- saves for each breakpoint id if it is disabled. Allows the debugger to disable/enable bps
 
-local nextBpFile = 0
+-- ============================================================================
+-- Shared Output File Format
+-- ============================================================================
+-- Both normal commands and breakpoints use a similar output format:
+-- For normal commands: out.txt contains "{index}\n{result}"
+-- For breakpoint results: bp_out.txt contains "{thread_id}:{cmd_index}\n{result}"
 
---- Helper to format output for breakpoint responses
+--- Write a result to an output file with an index prefix
+--- This is the shared format used by both normal commands and breakpoints
+---@param filename string -- The output file path
+---@param index string|integer -- The command index (or thread_id:cmd_index for breakpoints)
+---@param result string -- The result to write
+local function writeIndexedOutput(filename, index, result)
+    FileIO.Save(filename, tostring(index) .. "\n" .. result)
+end
+
+--- Helper to format output for responses
 ---@param value any
 ---@return string
-local function formatBreakpointOutput(value)
+local function formatOutput(value)
     if PrettyString then
         return PrettyString(value)
     end
@@ -91,6 +110,88 @@ local function createBreakpointEnv(localVariables)
         end
     end
     return env
+end
+
+-- ============================================================================
+-- Breakpoint System
+-- ============================================================================
+-- Breakpoints use per-coroutine data files and a shared metadata file:
+-- - bp_threads.txt: Lists all thread IDs currently in a breakpoint (one per line)
+-- - bp_data_<thread_id>.txt: Contains breakpoint data as a single FIELD_SEP-separated record:
+--     bp_id<SEP>value<SEP>stack<SEP>stacktrace<SEP>var1<SEP>val1<SEP>var2<SEP>val2...
+--     (stacktrace has \n escaped as \\n)
+-- - bp_in_<thread_id>_<idx>.txt: Per-thread input commands (incrementing files due to WC3 file caching)
+--     Content is just the raw command (no prefix needed since thread_id is in filename)
+-- - bp_out.txt: Output results with format "thread_id:cmd_index\nresult"
+
+-- Field separator for breakpoint data files (ASCII 31 = unit separator)
+-- This character is unlikely to appear in variable names/values
+local FIELD_SEP = string.char(31)
+
+local activeBreakpointThreads = {} ---@type table<string, boolean> -- Maps thread_id to true if in breakpoint
+
+--- Get a unique identifier for the current coroutine
+---@return string
+local function getThreadId()
+    local co = coroutine.running()
+    if co then
+        return tostring(co):match("thread: (.+)") or tostring(co)
+    end
+    return "main"
+end
+
+--- Update the bp_threads.txt metadata file with all active breakpoint threads
+local function updateBreakpointThreadsFile()
+    local threads = {}
+    for threadId, _ in pairs(activeBreakpointThreads) do
+        table.insert(threads, threadId)
+    end
+    if #threads > 0 then
+        FileIO.Save(FILES_ROOT .. "\\bp_threads.txt", table.concat(threads, "\n"))
+    else
+        -- Write empty marker when no threads are in breakpoint
+        FileIO.Save(FILES_ROOT .. "\\bp_threads.txt", "")
+    end
+end
+
+--- Write breakpoint data file for a specific thread
+--- Uses FIELD_SEP (ASCII 31) as field separator to avoid conflicts with variable values
+--- Format: bp_id<SEP>value<SEP>stack<SEP>stacktrace<SEP>var1<SEP>val1<SEP>var2<SEP>val2...
+---@param threadId string
+---@param breakpointId string|integer
+---@param localVariables table<string, any>?
+local function writeBreakpointDataFile(threadId, breakpointId, localVariables)
+    local fields = {}
+    -- Add bp_id
+    table.insert(fields, "bp_id")
+    table.insert(fields, tostring(breakpointId))
+    
+    -- Add stacktrace (use Debug.traceback for WC3 compatibility)
+    local stack = ""
+    if Debug and Debug.traceback then
+        stack = Debug.traceback("", 3) or ""
+    end
+    table.insert(fields, "stack")
+    -- Note: gsub returns two values, we only want the first (the modified string)
+    local escapedStack = stack:gsub("\n", "\\n")
+    table.insert(fields, escapedStack)
+    
+    -- Add local variable values (names are derived from keys)
+    if localVariables then
+        for k, v in pairs(localVariables) do
+            table.insert(fields, k)
+            table.insert(fields, formatOutput(v))
+        end
+    end
+    
+    FileIO.Save(FILES_ROOT .. "\\bp_data_" .. threadId .. ".txt", table.concat(fields, FIELD_SEP))
+end
+
+--- Remove breakpoint data file for a specific thread
+---@param threadId string
+local function removeBreakpointDataFile(threadId)
+    -- Write empty content to indicate the breakpoint is no longer active
+    FileIO.Save(FILES_ROOT .. "\\bp_data_" .. threadId .. ".txt", "")
 end
 
 --- Put a breakpoint in your code that will halt execution of a function and wait for external debugger instructions.
@@ -125,49 +226,69 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
 
     -- Create environment with locals and globals accessible
     local env = createBreakpointEnv(localVariables)
+    
+    -- Get thread ID and register this breakpoint
+    local threadId = getThreadId()
+    activeBreakpointThreads[threadId] = true
+    
+    -- Write breakpoint data file and update metadata
+    writeBreakpointDataFile(threadId, breakpointId, localVariables)
+    updateBreakpointThreadsFile()
 
-    -- Initial output: breakpoint ID and available local variables
-    local outData = "BREAKPOINT_HIT:" .. tostring(breakpointId)
-    if localVariables then
-        local varNames = {}
-        for k, _ in pairs(localVariables) do
-            table.insert(varNames, k)
-        end
-        if #varNames > 0 then
-            outData = outData .. "\nLocal variables: " .. table.concat(varNames, ", ")
-        end
-    end
-
+    -- Main breakpoint loop - wait for commands
+    -- Uses per-thread incrementing bp_in_<threadId>_<idx>.txt files due to WC3 file caching
+    -- Each thread has its own local command index to avoid clashing between breakpoints
+    local cmdIndex = 0
     while true do
-        FileIO.Save(FILES_ROOT .. "\\out_bp" .. nextBpFile .. ".txt", outData)
-        local commands = nil ---@type string?
-        while true do
-            commands = FileIO.Load(FILES_ROOT .. "\\bp_in" .. nextBpFile .. ".txt")
-            if commands ~= nil then break end
-            TriggerSleepAction(0.5)
-        end
-        nextBpFile = nextBpFile + 1
-        if commands == "continue" then return end
-
-        -- Execute the command with proper error handling
-        local cur_func, loadErr = load(commands, "breakpoint_cmd", "t", env)
-        if cur_func == nil then
-            outData = "Syntax error: " .. tostring(loadErr)
-        else
-            local ok, result = pcall(cur_func)
-            if ok then
-                outData = formatBreakpointOutput(result)
-            else
-                outData = "Runtime error: " .. tostring(result)
+        -- Check for commands in bp_in_<threadId>_<cmdIndex>.txt
+        local filename = FILES_ROOT .. "\\bp_in_" .. threadId .. "_" .. cmdIndex .. ".txt"
+        local command = FileIO.Load(filename)
+        if command ~= nil then
+            -- Command found - file content is just the raw command
+            if command == "continue" then
+                -- Clean up and exit breakpoint
+                activeBreakpointThreads[threadId] = nil
+                removeBreakpointDataFile(threadId)
+                updateBreakpointThreadsFile()
+                return
             end
+            
+            -- Execute the command with proper error handling
+            local cur_func, loadErr = load(command, "breakpoint_cmd", "t", env)
+            local outData
+            if cur_func == nil then
+                outData = "Syntax error: " .. tostring(loadErr)
+            else
+                local ok, result = pcall(cur_func)
+                if ok then
+                    outData = formatOutput(result)
+                else
+                    outData = "Runtime error: " .. tostring(result)
+                end
+            end
+            
+            -- Write result using shared format (thread_id:cmd_index as index)
+            writeIndexedOutput(FILES_ROOT .. "\\bp_out.txt", threadId .. ":" .. cmdIndex, outData)
+            
+            -- Update breakpoint data file (in case locals changed)
+            writeBreakpointDataFile(threadId, breakpointId, localVariables)
+            
+            cmdIndex = cmdIndex + 1
         end
+        TriggerSleepAction(0.1)
     end
 end
+
+-- ============================================================================
+-- Normal Command System
+-- ============================================================================
+-- Uses single out.txt file with format: "{index}\n{result}"
 
 local nextFile = 0
 local curPeriod = PERIOD
 local lastCommandExecuteTime = 0
 local timer = nil ---@type timer?
+
 function CheckFiles()
     --- first we trigger the next run in case this run crashes or returns
     TimerStart(timer, curPeriod, false, CheckFiles)
@@ -184,7 +305,8 @@ function CheckFiles()
         if cur_func ~= nil then
             result = cur_func()
         end
-        FileIO.Save(FILES_ROOT .. "\\out" .. nextFile .. ".txt", tostring(result))
+        -- Use shared output format: index on first line, result on subsequent lines
+        writeIndexedOutput(FILES_ROOT .. "\\out.txt", nextFile, tostring(result))
         nextFile = nextFile + 1
     end
     if os.clock() - lastCommandExecuteTime > 60 then
