@@ -498,6 +498,8 @@ def mock_main_environment(commands, capture_print=False, track_calls=False):
     patches = [
         patch.object(wc3_interpreter, 'input', side_effect=fake_input),
         patch.object(wc3_interpreter.signal, 'signal'),
+        patch.object(wc3_interpreter, 'start_breakpoint_monitor'),
+        patch.object(wc3_interpreter, 'stop_breakpoint_monitor'),
     ]
     
     if capture_print:
@@ -521,7 +523,7 @@ def mock_main_environment(commands, capture_print=False, track_calls=False):
         patches.append(patch.object(wc3_interpreter, 'remove_all_files'))
         patches.append(patch.object(wc3_interpreter, 'stop_all_watchers'))
     
-    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
         yield result
 
 
@@ -624,6 +626,8 @@ class TestFileCommand(unittest.TestCase):
                  patch.object(wc3_interpreter, 'stop_all_watchers'), \
                  patch.object(wc3_interpreter, 'send_file_to_game', side_effect=mock_send_file_to_game), \
                  patch.object(wc3_interpreter.signal, 'signal'), \
+                 patch.object(wc3_interpreter, 'start_breakpoint_monitor'), \
+                 patch.object(wc3_interpreter, 'stop_breakpoint_monitor'), \
                  patch('builtins.print'):
                 wc3_interpreter.main()
             
