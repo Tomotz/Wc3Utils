@@ -99,14 +99,15 @@ local function formatOutput(value)
 end
 
 --- Create an environment table that includes localVariables with globals as fallback
----@param localVariables table<string, any>?
+---@param localVariables {[1]: string, [2]: any}[]? -- Array of {name, value} pairs
 ---@return table
 local function createBreakpointEnv(localVariables)
     local env = {}
     setmetatable(env, {__index = _G})
     if localVariables then
-        for k, v in pairs(localVariables) do
-            env[k] = v
+        for _, pair in ipairs(localVariables) do
+            local name, value = pair[1], pair[2]
+            env[name] = value
         end
     end
     return env
@@ -159,8 +160,9 @@ end
 --- Format: bp_id<SEP>value<SEP>stack<SEP>stacktrace<SEP>var1<SEP>val1<SEP>var2<SEP>val2...
 ---@param threadId string
 ---@param breakpointId string|integer
----@param localVariables table<string, any>?
-local function writeBreakpointDataFile(threadId, breakpointId, localVariables)
+---@param localVariables {[1]: string, [2]: any}[]? -- Array of {name, value} pairs
+---@param env table? -- Environment table to read current values from (for modified variables)
+local function writeBreakpointDataFile(threadId, breakpointId, localVariables, env)
     local fields = {}
     -- Add bp_id
     table.insert(fields, "bp_id")
@@ -176,11 +178,13 @@ local function writeBreakpointDataFile(threadId, breakpointId, localVariables)
     local escapedStack = stack:gsub("\n", "\\n")
     table.insert(fields, escapedStack)
 
-    -- Add local variable values (names are derived from keys)
+    -- Add local variable values in order (read from env if provided, otherwise from original pairs)
     if localVariables then
-        for k, v in pairs(localVariables) do
-            table.insert(fields, k)
-            table.insert(fields, formatOutput(v))
+        for _, pair in ipairs(localVariables) do
+            local name = pair[1]
+            local value = env and env[name] or pair[2]
+            table.insert(fields, name)
+            table.insert(fields, formatOutput(value))
         end
     end
 
@@ -195,26 +199,40 @@ local function removeBreakpointDataFile(threadId)
 end
 
 --- Put a breakpoint in your code that will halt execution of a function and wait for external debugger instructions.
+--- Returns the (potentially modified) local variable values in the same order as the input array.
+--- Usage: `var1, var2 = Breakpoint(id, {{"var1", var1}, {"var2", var2}})`
 ---@param breakpointId integer | string -- Unique id for the breakpoint. Used for auto breakpoints set from the debugger. When called from user code, it should contain a unique string (that is not a number) to allow you to recognise the breakpoint.
----@param localVariables table<string, any>? -- a table mapping a local variable name to it's value. Will be used as the environment in the code called from the debugger. Note that for manual breakpoints, if you want to access locals from the debugger, you need to pass them here, and update them after the breakpoint finishes.
+---@param localVariables {[1]: string, [2]: any}[]? -- Array of {name, value} pairs. Will be used as the environment in the code called from the debugger. The values can be modified by the debugger and will be returned when the breakpoint continues.
 ---@param condition string? -- a string containing a lua expression. Breakpoint will only trigger if the expression is true.
 ---@param startsEnabled boolean? -- if false, the breakpoint will start disabled and must be enabled from the debugger. Default is true. This allows you to dynamically enable a static breakpoint (which can be set anywhere in the code unlike the dynamic one)
+---@return any ... -- Returns the local variable values in the same order as the input array (potentially modified by the debugger)
 --- Notes: 1. This function should only be called from yieldable context.
 --- 2. Execution of the thread will not continue unless you connect the debugger, be sure not to keep breakpoints in your final code.
 --- 3. To avoid desyncs, this function will do nothing in multiplayer
 function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
-    if isDisabled then return end
+    -- Helper function to return all local variable values from the environment
+    local function returnLocalValues(env, vars)
+        if not vars or #vars == 0 then return end
+        local values = {}
+        for _, pair in ipairs(vars) do
+            local name = pair[1]
+            table.insert(values, env[name])
+        end
+        return table.unpack(values)
+    end
+
+    if isDisabled then return returnLocalValues(createBreakpointEnv(localVariables), localVariables) end
 
     if not coroutine.isyieldable() then
         if Debug then
             Debug.throwError("Coroutine is not yieldable.")
         end
-        return
+        return returnLocalValues(createBreakpointEnv(localVariables), localVariables)
     end
     if EnabledBreakpoints[breakpointId] == nil then
         EnabledBreakpoints[breakpointId] = (startsEnabled == nil) or startsEnabled
     end
-    if EnabledBreakpoints[breakpointId] == false then return end
+    if EnabledBreakpoints[breakpointId] == false then return returnLocalValues(createBreakpointEnv(localVariables), localVariables) end
     
     -- Create environment with locals and globals accessible
     local env = createBreakpointEnv(localVariables)
@@ -223,9 +241,9 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
         local cond = load(condition, "breakpoint_condition", "t", env)
         if cond == nil then
             if Debug then Debug.throwError("error executing breakpoint condition") end
-            return
+            return returnLocalValues(env, localVariables)
         end
-        if not cond() then return end
+        if not cond() then return returnLocalValues(env, localVariables) end
     end
 
     -- Get thread ID and register this breakpoint
@@ -233,7 +251,7 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
     activeBreakpointThreads[threadId] = true
 
     -- Write breakpoint data file and update metadata
-    writeBreakpointDataFile(threadId, breakpointId, localVariables)
+    writeBreakpointDataFile(threadId, breakpointId, localVariables, env)
     updateBreakpointThreadsFile()
 
     -- Main breakpoint loop - wait for commands
@@ -253,7 +271,8 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
                 activeBreakpointThreads[threadId] = nil
                 removeBreakpointDataFile(threadId)
                 updateBreakpointThreadsFile()
-                return
+                -- Return the (potentially modified) local variable values
+                return returnLocalValues(env, localVariables)
             end
 
             -- Execute the command with proper error handling
@@ -274,7 +293,7 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
             writeIndexedOutput(FILES_ROOT .. "\\bp_out.txt", threadId .. ":" .. cmdIndex, outData)
 
             -- Update breakpoint data file (in case locals changed)
-            writeBreakpointDataFile(threadId, breakpointId, localVariables)
+            writeBreakpointDataFile(threadId, breakpointId, localVariables, env)
 
             cmdIndex = cmdIndex + 1
         end

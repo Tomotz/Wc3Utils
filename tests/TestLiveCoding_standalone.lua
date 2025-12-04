@@ -502,7 +502,8 @@ function test_Breakpoint_shows_local_variables()
     local co = coroutine.create(function()
         local myVar = 42
         local myString = "hello"
-        Breakpoint("test_bp_locals", {myVar = myVar, myString = myString})
+        -- Use new array format: {{"name", value}, ...}
+        myVar, myString = Breakpoint("test_bp_locals", {{"myVar", myVar}, {"myString", myString}})
         testComplete = true
     end)
 
@@ -689,7 +690,8 @@ function test_Breakpoint_basic_with_locals()
     local co = coroutine.create(function()
         local playerGold = 1000
         local playerLevel = 5
-        Breakpoint("basic_test", {gold = playerGold, level = playerLevel})
+        -- Use new array format: {{"name", value}, ...}
+        playerGold, playerLevel = Breakpoint("basic_test", {{"gold", playerGold}, {"level", playerLevel}})
         testComplete = true
     end)
 
@@ -787,7 +789,8 @@ function test_Breakpoint_conditional_true()
     -- Create a coroutine that hits a conditional breakpoint with true condition
     local co = coroutine.create(function()
         local gold = 600  -- Greater than 500, so condition should be true
-        Breakpoint("conditional_true_test", {gold = gold}, "return gold > 500")
+        -- Use new array format: {{"name", value}, ...}
+        gold = Breakpoint("conditional_true_test", {{"gold", gold}}, "return gold > 500")
         testComplete = true
     end)
 
@@ -835,7 +838,8 @@ function test_Breakpoint_dynamic_enable_disable()
 
     -- Create a coroutine that hits a dynamic breakpoint
     local co = coroutine.create(function()
-        Breakpoint("dynamic_test", {status = "testing"})
+        -- Use new array format: {{"name", value}, ...}
+        local status = Breakpoint("dynamic_test", {{"status", "testing"}})
         testComplete = true
     end)
 
@@ -906,7 +910,8 @@ function test_Breakpoint_conditional_false()
     -- Create a coroutine that hits a conditional breakpoint that should NOT trigger
     local co = coroutine.create(function()
         local gold = 400  -- Less than 500, so condition should be false
-        Breakpoint("conditional_false_test", {gold = gold}, "return gold > 500")
+        -- Use new array format: {{"name", value}, ...}
+        gold = Breakpoint("conditional_false_test", {{"gold", gold}}, "return gold > 500")
         testComplete = true
     end)
 
@@ -924,6 +929,90 @@ function test_Breakpoint_conditional_false()
     Debug.assert(testComplete, "Test should complete without blocking on false condition")
 
     print("--- test_Breakpoint_conditional_false completed ---")
+end
+
+-- ============================================================================
+-- Test: Variable modification - verify that modified values are returned
+-- ============================================================================
+
+function test_Breakpoint_variable_modification()
+    print("\n--- Running test_Breakpoint_variable_modification ---")
+    resetState()
+
+    -- Enable interpreter
+    GameStatus = GAME_STATUS_OFFLINE
+    bj_isSinglePlayer = true
+    TryInterpret(0.01)
+
+    local testComplete = false
+    local finalGold = nil
+    local finalLevel = nil
+
+    -- Create a coroutine that hits a breakpoint and captures returned values
+    local co = coroutine.create(function()
+        local playerGold = 1000
+        local playerLevel = 5
+        -- Use new array format: {{"name", value}, ...}
+        -- The returned values should be the (potentially modified) values
+        playerGold, playerLevel = Breakpoint("modify_test", {{"gold", playerGold}, {"level", playerLevel}})
+        finalGold = playerGold
+        finalLevel = playerLevel
+        testComplete = true
+    end)
+
+    -- Start the coroutine
+    coroutine.resume(co)
+
+    -- Advance time to let the breakpoint write its output
+    TriggerSleepAction(0.1)
+
+    -- Find the breakpoint
+    local threadId, bpData = findThreadWithBreakpoint("modify_test")
+    Debug.assert(threadId ~= nil, "Should find thread in modify_test breakpoint")
+    Debug.assert(bpData ~= nil, "Breakpoint data file should exist for modify_test")
+
+    -- Verify initial values
+    Debug.assert(bpData.locals_values["gold"] == "1000",
+        "gold should initially be 1000, got: " .. tostring(bpData.locals_values["gold"]))
+    Debug.assert(bpData.locals_values["level"] == "5",
+        "level should initially be 5, got: " .. tostring(bpData.locals_values["level"]))
+
+    -- Modify gold to 2000
+    local cmdIdx = bpCommandIndices[threadId] or 0
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "gold = 2000")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()
+
+    -- Modify level to 10
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "level = 10")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()
+
+    -- Verify the breakpoint data file shows updated values
+    bpData = getBreakpointData(threadId)
+    Debug.assert(bpData.locals_values["gold"] == "2000",
+        "gold should be 2000 after modification, got: " .. tostring(bpData.locals_values["gold"]))
+    Debug.assert(bpData.locals_values["level"] == "10",
+        "level should be 10 after modification, got: " .. tostring(bpData.locals_values["level"]))
+
+    -- Continue from breakpoint
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "continue")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.6)
+    resumeOneCoroutine()
+
+    -- Verify test completed
+    Debug.assert(testComplete, "Test function should have completed after continue")
+
+    -- Verify the returned values are the modified values
+    Debug.assert(finalGold == 2000, "Returned gold should be 2000, got: " .. tostring(finalGold))
+    Debug.assert(finalLevel == 10, "Returned level should be 10, got: " .. tostring(finalLevel))
+
+    print("--- test_Breakpoint_variable_modification completed ---")
 end
 
 -- ============================================================================
@@ -963,6 +1052,9 @@ test_Breakpoint_basic_with_locals()
 test_Breakpoint_conditional_true()
 test_Breakpoint_conditional_false()
 test_Breakpoint_dynamic_enable_disable()
+
+-- Variable modification test (new feature)
+test_Breakpoint_variable_modification()
 
 print("\n============================================================")
 print("ALL LIVECODING TESTS PASSED!")

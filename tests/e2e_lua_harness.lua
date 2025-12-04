@@ -123,8 +123,9 @@ local function test_breakpoint_basic()
         local playerLevel = 5
         print("About to hit breakpoint with gold=" .. playerGold .. ", level=" .. playerLevel)
         -- Use the REAL Breakpoint function from LiveCoding.lua
-        Breakpoint("basic_test", {gold = playerGold, level = playerLevel})
-        print("Breakpoint continued!")
+        -- Use new array format: {{"name", value}, ...}
+        playerGold, playerLevel = Breakpoint("basic_test", {{"gold", playerGold}, {"level", playerLevel}})
+        print("Breakpoint continued! gold=" .. tostring(playerGold) .. ", level=" .. tostring(playerLevel))
         testComplete = true
     end)
 
@@ -174,8 +175,9 @@ local function test_breakpoint_conditional_true()
         local gold = 600
         print("About to hit conditional breakpoint with gold=" .. gold .. " (condition: gold > 500)")
         -- Use the REAL Breakpoint function from LiveCoding.lua
-        Breakpoint("conditional_test", {gold = gold}, "return gold > 500")
-        print("Conditional breakpoint continued!")
+        -- Use new array format: {{"name", value}, ...}
+        gold = Breakpoint("conditional_test", {{"gold", gold}}, "return gold > 500")
+        print("Conditional breakpoint continued! gold=" .. tostring(gold))
         testComplete = true
     end)
 
@@ -215,8 +217,9 @@ local function test_breakpoint_conditional_false()
         local gold = 400
         print("About to hit conditional breakpoint with gold=" .. gold .. " (condition: gold > 500)")
         -- Use the REAL Breakpoint function from LiveCoding.lua
-        Breakpoint("conditional_false_test", {gold = gold}, "return gold > 500")
-        print("Conditional breakpoint skipped (condition was false)!")
+        -- Use new array format: {{"name", value}, ...}
+        gold = Breakpoint("conditional_false_test", {{"gold", gold}}, "return gold > 500")
+        print("Conditional breakpoint skipped (condition was false)! gold=" .. tostring(gold))
         testComplete = true
     end)
 
@@ -234,6 +237,71 @@ local function test_breakpoint_conditional_false()
     end
 
     print("Test completed successfully!")
+end
+
+-- Test: Variable modification - verify that modified values are returned
+local function test_breakpoint_variable_modification()
+    print("Starting breakpoint_variable_modification test...")
+
+    local testComplete = false
+    local finalGold = nil
+    local finalLevel = nil
+    local co = coroutine.create(function()
+        local playerGold = 1000
+        local playerLevel = 5
+        print("About to hit breakpoint with gold=" .. playerGold .. ", level=" .. playerLevel)
+        -- Use the REAL Breakpoint function from LiveCoding.lua
+        -- Use new array format: {{"name", value}, ...}
+        -- The Python interpreter will modify gold to 2000 and level to 10
+        playerGold, playerLevel = Breakpoint("modify_test", {{"gold", playerGold}, {"level", playerLevel}})
+        finalGold = playerGold
+        finalLevel = playerLevel
+        print("Breakpoint continued! gold=" .. tostring(playerGold) .. ", level=" .. tostring(playerLevel))
+        testComplete = true
+    end)
+
+    -- Start the coroutine
+    print("Starting coroutine...")
+    local success, err = coroutine.resume(co)
+    if not success then
+        error("Coroutine failed to start: " .. tostring(err))
+    end
+
+    -- The coroutine should now be waiting at the breakpoint
+    print("Coroutine started, waiting for Python to interact and modify variables...")
+
+    -- Poll and process timers/coroutines until test completes or timeout
+    -- Large timeout (60s) for reliability - actual response should be much faster
+    local maxIterations = 600  -- 60 seconds at 0.1s per iteration
+    local iteration = 0
+    while not testComplete and iteration < maxIterations do
+        -- Advance time and process timers/coroutines
+        TriggerSleepAction(0.1)
+        processTimersAndCoroutines()
+
+        -- Check if coroutine is dead (test failed to complete)
+        if coroutine.status(co) == "dead" and not testComplete then
+            break
+        end
+
+        -- Small sleep to avoid busy waiting (real time, not simulated)
+        os.execute("sleep 0.1")
+        iteration = iteration + 1
+    end
+
+    if not testComplete then
+        error("Test did not complete - breakpoint was not continued (iterations: " .. iteration .. ")")
+    end
+
+    -- Verify the returned values are the modified values
+    if finalGold ~= 2000 then
+        error("Returned gold should be 2000, got: " .. tostring(finalGold))
+    end
+    if finalLevel ~= 10 then
+        error("Returned level should be 10, got: " .. tostring(finalLevel))
+    end
+
+    print("Test completed successfully! Variables were modified correctly.")
 end
 
 -- Test: Disabled breakpoint (should not block)
@@ -293,6 +361,8 @@ elseif testName == "breakpoint_conditional_false" then
     runTest("breakpoint_conditional_false", test_breakpoint_conditional_false)
 elseif testName == "breakpoint_disabled" then
     runTest("breakpoint_disabled", test_breakpoint_disabled)
+elseif testName == "breakpoint_variable_modification" then
+    runTest("breakpoint_variable_modification", test_breakpoint_variable_modification)
 else
     print("Unknown test: " .. testName)
     os.exit(1)
