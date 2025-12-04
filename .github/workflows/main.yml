@@ -45,4 +45,4 @@ jobs:
     - name: Run Python tests
       run: |
         cd python
-        python -m pytest test_wc3_interpreter.py -v
+        python -m pytest test_wc3_interpreter.py test_wc3_interpreter_e2e.py -v
