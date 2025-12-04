@@ -10,7 +10,6 @@ import sys
 import traceback
 import threading
 from typing import Optional, Callable, Dict, List, Tuple
-from queue import Queue, Empty
 
 # Optional watchdog import for file watching functionality
 try:
@@ -111,7 +110,6 @@ watched_files: Dict[str, any] = {}  # filepath -> Observer
 file_watch_lock: threading.Lock = threading.Lock()
 
 # Global state for breakpoint handling
-breakpoint_queue: Queue[Tuple[str, Dict]] = Queue()  # Queue for breakpoint notifications (thread_id, bp_info)
 bp_monitor_thread: Optional[threading.Thread] = None  # Background thread for monitoring breakpoints
 bp_monitor_stop_event: threading.Event = threading.Event()  # Event to signal thread to stop
 bp_command_indices: Dict[str, int] = {}  # Maps thread_id to next command index (per-thread counters)
@@ -119,6 +117,8 @@ bp_command_indices: Dict[str, int] = {}  # Maps thread_id to next command index 
 # Unified interface state for breakpoint handling
 # When a breakpoint is hit, it becomes the current context and commands go to it
 # Additional breakpoints are queued and handled after the current one is continued
+# These are accessed from both the monitor thread and main thread, so we use a lock
+bp_state_lock: threading.Lock = threading.Lock()  # Lock for breakpoint state
 current_breakpoint: Optional[Tuple[str, Dict]] = None  # (thread_id, info) of current breakpoint being handled
 pending_breakpoints: List[Tuple[str, Dict]] = []  # Queue of breakpoints waiting to be handled
 
@@ -573,16 +573,37 @@ def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
 
 
 def breakpoint_monitor_thread() -> None:
-    """Background thread that monitors for new breakpoint threads."""
+    """Background thread that monitors for new breakpoint threads.
+    
+    This thread handles breakpoint state management and prints BREAKPOINT HIT messages
+    immediately when breakpoints are detected, without waiting for user input.
+    """
+    global current_breakpoint, pending_breakpoints
     known_threads: set[bytes] = set()
     while not bp_monitor_stop_event.is_set():
         current_threads: set[bytes] = set(get_breakpoint_threads())
         new_threads = current_threads - known_threads
 
-        for thread_id in new_threads:
-            info = get_breakpoint_info(thread_id.decode('utf-8', errors='replace'))
-            if info:
-                breakpoint_queue.put((thread_id.decode('utf-8', errors='replace'), info))
+        for thread_id_bytes in new_threads:
+            thread_id = thread_id_bytes.decode('utf-8', errors='replace')
+            info = get_breakpoint_info(thread_id)
+            if not info:
+                continue
+            
+            with bp_state_lock:
+                # Update state
+                if current_breakpoint is None:
+                    current_breakpoint = (thread_id, info)
+                else:
+                    pending_breakpoints.append((thread_id, info))
+                
+                # Always print the BREAKPOINT HIT message immediately
+                # Use the same format for both current and queued breakpoints
+                print_breakpoint_hit(thread_id, info)
+                
+                # If this is a queued breakpoint, add a note about context
+                if current_breakpoint[0] != thread_id:
+                    print(f"[Note: this breakpoint is queued; current context stays at {current_breakpoint[0][:8]}... until you 'continue']", flush=True)
 
         known_threads = current_threads
         time.sleep(0.2)  # Check every 200ms
@@ -608,43 +629,20 @@ def stop_breakpoint_monitor() -> None:
 
 
 def print_breakpoint_hit(thread_id: str, info: Dict[str, any]) -> None:
-    """Print a message when a breakpoint is hit."""
+    """Print a message when a breakpoint is hit.
+    
+    Uses flush=True to ensure immediate output when called from background thread.
+    """
     bp_id = info.get('bp_id', 'unknown')
     locals_list = info.get('locals', [])
 
-    print("\n" + "=" * 60)
-    print(f"BREAKPOINT HIT: {bp_id}")
-    print(f"Thread: {thread_id}")
+    print("\n" + "=" * 60, flush=True)
+    print(f"BREAKPOINT HIT: {bp_id}", flush=True)
+    print(f"Thread: {thread_id}", flush=True)
     if locals_list:
-        print(f"Local variables: {b', '.join(locals_list)}")
-    print("Type 'help' for commands, 'continue' to resume, or enter Lua code")
-    print("=" * 60)
-
-
-def process_new_breakpoints() -> None:
-    """Process any new breakpoints from the monitor thread.
-    
-    If no current breakpoint, the first new one becomes current.
-    Additional breakpoints are queued and their hit messages are printed.
-    """
-    global current_breakpoint, pending_breakpoints
-    
-    while True:
-        try:
-            thread_id, info = breakpoint_queue.get_nowait()
-            if current_breakpoint is None:
-                # No current breakpoint - this becomes the current one
-                current_breakpoint = (thread_id, info)
-                print_breakpoint_hit(thread_id, info)
-            else:
-                # Already handling a breakpoint - queue this one
-                pending_breakpoints.append((thread_id, info))
-                # Print message so user knows another breakpoint was hit
-                bp_id = info.get('bp_id', 'unknown')
-                print(f"\n[Breakpoint queued: {bp_id} (thread {thread_id})]")
-                print(f"[{len(pending_breakpoints)} breakpoint(s) pending. Current context unchanged.]")
-        except Empty:
-            break
+        print(f"Local variables: {b', '.join(locals_list)}", flush=True)
+    print("Type 'help' for commands, 'continue' to resume, or enter Lua code", flush=True)
+    print("=" * 60, flush=True)
 
 
 def handle_breakpoint_command(cmd: str) -> bool:
@@ -654,10 +652,11 @@ def handle_breakpoint_command(cmd: str) -> bool:
     """
     global current_breakpoint, pending_breakpoints
     
-    if current_breakpoint is None:
-        return False
-    
-    thread_id, info = current_breakpoint
+    with bp_state_lock:
+        if current_breakpoint is None:
+            return False
+        
+        thread_id, info = current_breakpoint
     
     if cmd == "help":
         print("Breakpoint mode commands:")
@@ -713,18 +712,19 @@ def handle_breakpoint_command(cmd: str) -> bool:
         print(f"Resuming thread {thread_id}...")
         
         # Move to next pending breakpoint if any
-        if pending_breakpoints:
-            next_bp = pending_breakpoints.pop(0)
-            current_breakpoint = next_bp
-            print_breakpoint_hit(next_bp[0], next_bp[1])
+        with bp_state_lock:
             if pending_breakpoints:
-                print(f"[{len(pending_breakpoints)} more breakpoint(s) pending]")
-            return True
-        else:
-            # No more breakpoints - return to normal mode
-            current_breakpoint = None
-            print("[Returning to normal command mode]")
-            return False
+                next_bp = pending_breakpoints.pop(0)
+                current_breakpoint = next_bp
+                print_breakpoint_hit(next_bp[0], next_bp[1])
+                if pending_breakpoints:
+                    print(f"[{len(pending_breakpoints)} more breakpoint(s) pending]")
+                return True
+            else:
+                # No more breakpoints - return to normal mode
+                current_breakpoint = None
+                print("[Returning to normal command mode]")
+                return False
 
     # Send Lua command to game
     response = send_breakpoint_command(thread_id, cmd)
@@ -737,13 +737,13 @@ def handle_breakpoint_command(cmd: str) -> bool:
 
 def get_prompt() -> str:
     """Get the appropriate prompt based on current context."""
-    global current_breakpoint
-    if current_breakpoint is not None:
-        thread_id = current_breakpoint[0]
-        short_id = thread_id[:8] if len(thread_id) > 8 else thread_id
-        return f"bp:{short_id}... >>> "
-    else:
-        return f"{nextFile} >>> "
+    with bp_state_lock:
+        if current_breakpoint is not None:
+            thread_id = current_breakpoint[0]
+            short_id = thread_id[:8] if len(thread_id) > 8 else thread_id
+            return f"bp:{short_id}... >>> "
+        else:
+            return f"{nextFile} >>> "
 
 def signal_handler(sig: int, frame) -> None:
     """On any termination of the program we want to remove the input and output files and stop watchers"""
@@ -831,9 +831,8 @@ def main() -> None:
 
     print(f"Wc3 Interpreter {VERSION}. For help, type `help`.")
     while True:
-        # Process any new breakpoints from the monitor thread
-        # This will automatically print messages and set/queue breakpoints
-        process_new_breakpoints()
+        # Breakpoint state is managed by the background monitor thread
+        # which prints BREAKPOINT HIT messages immediately when detected
 
         # get console input with context-appropriate prompt
         try:
@@ -846,7 +845,9 @@ def main() -> None:
             continue
 
         # If we're in breakpoint context, route commands there
-        if current_breakpoint is not None:
+        with bp_state_lock:
+            in_bp_mode = current_breakpoint is not None
+        if in_bp_mode:
             # Handle breakpoint-specific commands
             handle_breakpoint_command(cmd)
             continue
