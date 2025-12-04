@@ -517,22 +517,24 @@ function Preloader(filename)
 
     -- If MOCK_FILE_MIRROR_ROOT is set and file not in memory, try to read from disk
     if not content and MOCK_FILE_MIRROR_ROOT then
-        pcall(function()
-            local normalized = filename:gsub("\\", "/")
-            local full = MOCK_FILE_MIRROR_ROOT .. normalized
-            local f = io.open(full, "rb")
-            if f then
-                content = f:read("*all")
-                f:close()
-                -- Store in memory for future access
-                if content then
-                    fileSystem[filename] = content
-                end
+        local normalized = filename:gsub("\\", "/")
+        local full = MOCK_FILE_MIRROR_ROOT .. normalized
+        local f = io.open(full, "rb")
+        if f then
+            content = f:read("*all")
+            f:close()
+            -- Store in memory for future access
+            -- Only cache non-empty content to avoid negative caching
+            -- (empty files may be written later with actual content)
+            if content and #content > 0 then
+                fileSystem[filename] = content
+            else
+                content = nil
             end
-        end)
+        end
     end
 
-    if content then
+    if content and #content > 0 then
         local startMarker = "//!beginusercode\n"
         local endMarker = "\n//!endusercode"
         local startPos = content:find(startMarker, 1, true)

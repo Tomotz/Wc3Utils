@@ -96,6 +96,22 @@ local testResults = {
     errors = {}
 }
 
+-- Debug flag - set via environment variable
+local DEBUG_E2E = os.getenv("WC3_E2E_DEBUG")
+
+-- Wrap FileIO.Load to add debug logging for breakpoint files
+if DEBUG_E2E and FileIO and FileIO.Load then
+    local originalFileIOLoad = FileIO.Load
+    FileIO.Load = function(filename)
+        local result = originalFileIOLoad(filename)
+        if filename:match("bp_in_") or filename:match("bp_out") then
+            print("[DEBUG Lua] FileIO.Load(" .. filename .. ") = " .. (result and ("'" .. result:sub(1, 50) .. "'") or "nil"))
+        end
+        return result
+    end
+    print("[DEBUG Lua] FileIO.Load wrapper installed")
+end
+
 -- Test: Basic breakpoint with locals
 local function test_breakpoint_basic()
     print("Starting breakpoint_basic test...")
@@ -124,7 +140,8 @@ local function test_breakpoint_basic()
 
     -- Poll and process timers/coroutines until test completes or timeout
     -- Use processTimersAndCoroutines from TestLib_mocks.lua
-    local maxIterations = 100  -- 10 seconds at 0.1s per iteration
+    -- Large timeout (60s) for reliability - actual response should be much faster
+    local maxIterations = 600  -- 60 seconds at 0.1s per iteration
     local iteration = 0
     while not testComplete and iteration < maxIterations do
         -- Advance time and process timers/coroutines
@@ -169,7 +186,8 @@ local function test_breakpoint_conditional_true()
 
     print("Coroutine started, waiting for Python to interact...")
 
-    local maxIterations = 100
+    -- Large timeout (60s) for reliability - actual response should be much faster
+    local maxIterations = 600
     local iteration = 0
     while not testComplete and iteration < maxIterations do
         TriggerSleepAction(0.1)

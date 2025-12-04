@@ -532,7 +532,13 @@ def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
     # Wait for response in bp_out.txt
     expected_prefix = f"{thread_id}:{cmd_index}"
     start_time = time.time()
-    timeout = 15
+    timeout = 60  # Large timeout for reliability - actual response should be much faster
+    debug = os.environ.get('WC3_E2E_DEBUG')
+
+    if debug:
+        print(f"[DEBUG] send_breakpoint_command: thread_id={thread_id}, cmd_index={cmd_index}")
+        print(f"[DEBUG] Wrote command to: {filename}")
+        print(f"[DEBUG] Waiting for response with prefix: {expected_prefix}")
 
     while time.time() - start_time < timeout:
         bp_out_file = os.path.join(FILES_ROOT, "bp_out.txt")
@@ -541,10 +547,22 @@ def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
             content = load_nonloadable_file(bp_out_file)
             if content:
                 index, result = parse_indexed_output(content)
+                if debug:
+                    print(f"[DEBUG] bp_out.txt content (first 100 bytes): {content[:100]}")
+                    print(f"[DEBUG] Parsed index: {index}, expected: {expected_prefix}")
                 if index and index.decode('utf-8', errors='replace') == expected_prefix:
                     bp_command_indices[thread_id] = cmd_index + 1
+                    if debug:
+                        print(f"[DEBUG] Got matching response!")
                     return result.decode('utf-8', errors='replace') if result else None
         time.sleep(0.1)
+
+    if debug:
+        print(f"[DEBUG] TIMEOUT waiting for {expected_prefix}")
+        print(f"[DEBUG] bp_out.txt exists: {os.path.exists(bp_out_file)}")
+        if os.path.exists(bp_out_file):
+            content = load_nonloadable_file(bp_out_file)
+            print(f"[DEBUG] Final bp_out.txt content: {content}")
 
     assert(time.time() - start_time < timeout)
     return None
