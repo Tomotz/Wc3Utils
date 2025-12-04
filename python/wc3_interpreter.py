@@ -397,6 +397,11 @@ def load_nonloadable_file(filename: str) -> Optional[bytes]:
     if matches:
         return b''.join(matches)
     
+    # Check if this looks like a preload wrapper (has PreloadStart/PreloadEnd but no Preload calls)
+    # This happens when FileIO.Save is called with empty data
+    if b'call PreloadStart()' in content and b'call PreloadEnd(' in content:
+        return None
+    
     # Fallback: return raw content if no preload wrapper found (for backwards compatibility)
     return content
 

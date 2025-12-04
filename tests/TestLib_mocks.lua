@@ -341,6 +341,9 @@ local runningCoroutines = {}
 function TriggerSleepAction(duration)
     local co, isMain = coroutine.running()
 
+    -- Save the resume time BEFORE advancing currentTime
+    -- This ensures the coroutine waits for the next time advancement
+    local resumeTime = currentTime + duration
     currentTime = currentTime + duration
 
     for _, timer in ipairs(activeTimers) do
@@ -371,7 +374,7 @@ function TriggerSleepAction(duration)
         return
     end
 
-    table.insert(runningCoroutines, {co = co, resumeTime = currentTime})
+    table.insert(runningCoroutines, {co = co, resumeTime = resumeTime})
     coroutine.yield()
 end
 
