@@ -247,6 +247,8 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
         if command ~= nil then
             -- Command found - file content is just the raw command
             if command == "continue" then
+                -- Acknowledge the continue command for the debugger protocol
+                writeIndexedOutput(FILES_ROOT .. "\\bp_out.txt", threadId .. ":" .. cmdIndex, "")
                 -- Clean up and exit breakpoint
                 activeBreakpointThreads[threadId] = nil
                 removeBreakpointDataFile(threadId)
