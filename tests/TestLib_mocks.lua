@@ -442,9 +442,6 @@ MOCK_FILE_MIRROR_ROOT = MOCK_FILE_MIRROR_ROOT or nil
 ---@type table<string, string>
 local fileSystem = {}
 
----@type table<string, string>
-local rawFileSystem = {}
-
 ---@param data string
 function Preload(data)
     if not fileSystem._currentFile then
@@ -460,17 +457,35 @@ end
 ---@param filename string
 function PreloadGenEnd(filename)
     if fileSystem._currentFile then
-        local content = table.concat(fileSystem._currentFile)
+        local chunks = fileSystem._currentFile
+        local isLoadable = false
+        -- Check if this is a loadable file by looking for the beginusercode marker in the first chunk
+        if #chunks > 0 and chunks[1]:find("//!beginusercode", 1, true) then
+            isLoadable = true
+        end
+
+        local content
+        if isLoadable then
+            -- For loadable files, just concatenate the chunks as before
+            content = table.concat(chunks)
+        else
+            -- For nonloadable files, wrap in proper WC3 preload format
+            -- Format: function PreloadFiles takes nothing returns nothing\n\n\tcall PreloadStart()\n\tcall Preload( "..." )\n\tcall PreloadEnd( 0.0 )\n\nendfunction
+            local lines = {}
+            table.insert(lines, "function PreloadFiles takes nothing returns nothing")
+            table.insert(lines, "")
+            table.insert(lines, "\tcall PreloadStart()")
+            for _, chunk in ipairs(chunks) do
+                table.insert(lines, '\tcall Preload( "' .. chunk .. '" )')
+            end
+            table.insert(lines, "\tcall PreloadEnd( 0.0 )")
+            table.insert(lines, "")
+            table.insert(lines, "endfunction")
+            content = table.concat(lines, "\n")
+        end
+
         fileSystem[filename] = content
         fileSystem._currentFile = nil
-
-        -- Also store raw content for files without //!beginusercode marker
-        -- This handles files saved with isLoadable=false
-        -- Extract raw content from Preload calls (content without the wrapper)
-        if not content:find("//!beginusercode", 1, true) then
-            -- File was saved with isLoadable=false, store raw content
-            rawFileSystem[filename] = content
-        end
 
         -- Mirror to real OS files if MOCK_FILE_MIRROR_ROOT is set (for E2E tests)
         if MOCK_FILE_MIRROR_ROOT then
@@ -545,11 +560,56 @@ function Preloader(filename)
     end
 end
 
+---Parse nonloadable file content and extract the payload from preload wrapper
+---Handles payloads with newlines and doubled quotes ("") inside
+---@param content string -- The raw file content with preload wrapper
+---@return string? -- The extracted payload, or nil if parsing fails
+local function parseNonloadableContent(content)
+    if not content then return nil end
+    local payload = {}
+    local pos = 1
+    while true do
+        -- Find the start of a Preload call and the opening quote
+        local callStart, quoteStart = content:find('call Preload%(%s*"', pos)
+        if not callStart then break end
+
+        local i = quoteStart + 1
+        local buf = {}
+
+        while i <= #content do
+            local c = content:sub(i, i)
+            if c == '"' then
+                local nextc = content:sub(i + 1, i + 1)
+                if nextc == '"' then
+                    -- Doubled quote inside the string, keep both quotes
+                    table.insert(buf, '""')
+                    i = i + 2
+                else
+                    -- This is the closing quote before the ` )`
+                    break
+                end
+            else
+                table.insert(buf, c)
+                i = i + 1
+            end
+        end
+
+        table.insert(payload, table.concat(buf))
+        pos = i + 1
+    end
+
+    if #payload > 0 then
+        return table.concat(payload)
+    end
+    return nil
+end
+
 ---Get raw file content (for files saved with isLoadable=false)
+---Parses the preload wrapper and returns just the payload
 ---@param filename string
 ---@return string?
 function getRawFileContent(filename)
-    local content = rawFileSystem[filename]
+    local content = fileSystem[filename]
 
     -- If MOCK_FILE_MIRROR_ROOT is set and file not in memory, try to read from disk
     if not content and MOCK_FILE_MIRROR_ROOT then
@@ -559,20 +619,23 @@ function getRawFileContent(filename)
             local f = io.open(full, "rb")
             if f then
                 content = f:read("*all")
-                -- Remove the first 3 lines and last 6 lines, and
                 f:close()
+                -- Store in memory for future access
+                if content then
+                    fileSystem[filename] = content
+                end
             end
         end)
     end
 
-    return content
+    -- Parse the preload wrapper and extract the payload
+    return parseNonloadableContent(content)
 end
 
 ---Clear a file from the mock file system
 ---@param filename string
 function clearFile(filename)
     fileSystem[filename] = nil
-    rawFileSystem[filename] = nil
 end
 
 ---Clear all files matching a pattern from the mock file system
@@ -581,11 +644,6 @@ function clearFilesMatching(pattern)
     for filename in pairs(fileSystem) do
         if filename:match(pattern) then
             fileSystem[filename] = nil
-        end
-    end
-    for filename in pairs(rawFileSystem) do
-        if filename:match(pattern) then
-            rawFileSystem[filename] = nil
         end
     end
 end

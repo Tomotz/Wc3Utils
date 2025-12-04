@@ -367,9 +367,18 @@ def parse_indexed_output(content: bytes) -> Tuple[Optional[bytes], Optional[byte
 def load_nonloadable_file(filename: str) -> Optional[bytes]:
     """Read payload from files saved via FileIO.Save(..., isLoadable=False) in the test environment.
 
-    In WC3, these files still go through the Preload mechanism but don't contain the markers
-    used by load_file(). In our Lua test harness, FileIO mocks mirror the escaped payload
-    directly to disk via FILEIO_MIRROR_ROOT, and we read it as-is here.
+    In WC3, these files go through the Preload mechanism and are wrapped in a standard format:
+        function PreloadFiles takes nothing returns nothing
+        
+            call PreloadStart()
+            call Preload( "payload_chunk1" )
+            call Preload( "payload_chunk2" )
+            call PreloadEnd( 0.0 )
+        
+        endfunction
+
+    This function parses the preload wrapper and extracts the concatenated payload from all
+    Preload() calls.
 
     This function is used for breakpoint metadata files (bp_threads.txt, bp_data_*.txt, bp_out.txt)
     which are saved with isLoadable=False by LiveCoding.lua.
@@ -377,7 +386,19 @@ def load_nonloadable_file(filename: str) -> Optional[bytes]:
     if not os.path.exists(filename):
         return None
     with open(filename, 'rb') as file:
-        return file.read()
+        content = file.read()
+    
+    # Parse the preload wrapper and extract payload from call Preload( "..." ) lines
+    # Pattern matches: call Preload( "..." ) and allows double quotes inside the payload
+    # The pattern ((?:""|[^"])*) matches either doubled quotes "" or non-quote chars,
+    # stopping only at the closing " ) sequence
+    pattern = rb'call Preload\( "((?:""|[^"])*)" \)'
+    matches = re.findall(pattern, content)
+    if matches:
+        return b''.join(matches)
+    
+    # Fallback: return raw content if no preload wrapper found (for backwards compatibility)
+    return content
 
 
 def get_breakpoint_threads() -> List[bytes]:

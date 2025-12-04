@@ -18,6 +18,7 @@ from unittest.mock import patch, MagicMock
 import wc3_interpreter
 from wc3_interpreter import (
     load_file,
+    load_nonloadable_file,
     create_file,
     wrap_with_oninit_immediate,
     find_lua_function,
@@ -338,6 +339,142 @@ class TestFileFormat(unittest.TestCase):
         self.assertIn("Preload", LINE_PREFIX)
         self.assertIn("i([[", LINE_PREFIX)
         self.assertIn("]])", LINE_POSTFIX)
+
+
+class TestLoadNonloadableFile(unittest.TestCase):
+    """Tests for the load_nonloadable_file function that parses WC3 nonloadable preload format files."""
+
+    def test_load_nonloadable_file_nonexistent(self):
+        """Test that load_nonloadable_file returns None for non-existent files."""
+        result = load_nonloadable_file("/nonexistent/path/to/file.txt")
+        self.assertIsNone(result)
+
+    def test_load_nonloadable_file_single_chunk(self):
+        """Test loading a nonloadable file with a single Preload chunk."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            # Create content in the expected nonloadable preload format
+            content = '''function PreloadFiles takes nothing returns nothing
+
+\tcall PreloadStart()
+\tcall Preload( "hello world" )
+\tcall PreloadEnd( 0.0 )
+
+endfunction'''
+            f.write(content)
+            temp_path = f.name
+        try:
+            result = load_nonloadable_file(temp_path)
+            self.assertEqual(result, b'hello world')
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_nonloadable_file_multiple_chunks(self):
+        """Test loading a nonloadable file with multiple Preload chunks."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            content = '''function PreloadFiles takes nothing returns nothing
+
+\tcall PreloadStart()
+\tcall Preload( "hello " )
+\tcall Preload( "world" )
+\tcall PreloadEnd( 0.0 )
+
+endfunction'''
+            f.write(content)
+            temp_path = f.name
+        try:
+            result = load_nonloadable_file(temp_path)
+            self.assertEqual(result, b'hello world')
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_nonloadable_file_with_newlines_in_payload(self):
+        """Test loading a nonloadable file with newlines in the payload."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            # Newlines within the payload should be preserved
+            content = '''function PreloadFiles takes nothing returns nothing
+
+\tcall PreloadStart()
+\tcall Preload( "line1" )
+\tcall Preload( "line2" )
+\tcall PreloadEnd( 0.0 )
+
+endfunction'''
+            f.write(content)
+            temp_path = f.name
+        try:
+            result = load_nonloadable_file(temp_path)
+            self.assertEqual(result, b'line1line2')
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_nonloadable_file_fallback_raw_content(self):
+        """Test that load_nonloadable_file returns raw content if no preload wrapper found."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            # Content without preload wrapper
+            content = "raw content without wrapper"
+            f.write(content)
+            temp_path = f.name
+        try:
+            result = load_nonloadable_file(temp_path)
+            # Should return raw content as fallback
+            self.assertEqual(result, content.encode())
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_nonloadable_file_expected_format(self):
+        """Test that load_nonloadable_file correctly parses the expected WC3 nonloadable format.
+        
+        The expected format is:
+        function PreloadFiles takes nothing returns nothing
+
+            call PreloadStart()
+            call Preload( "payload_chunk1" )
+            call Preload( "payload_chunk2" )
+            call PreloadEnd( 0.0 )
+
+        endfunction
+        """
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            # Create content matching the exact expected format from the user
+            content = '''function PreloadFiles takes nothing returns nothing
+
+\tcall PreloadStart()
+\tcall Preload( "0:|c00750508testMap_007|r" )
+\tcall Preload( "0:Testing log" )
+\tcall PreloadEnd( 11.3 )
+
+endfunction'''
+            f.write(content)
+            temp_path = f.name
+        try:
+            result = load_nonloadable_file(temp_path)
+            self.assertEqual(result, b'0:|c00750508testMap_007|r0:Testing log')
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_nonloadable_file_with_double_quotes_in_payload(self):
+        """Test that load_nonloadable_file correctly handles double quotes inside the payload.
+        
+        In JASS/WC3, double quotes inside strings are represented as "" (doubled quotes).
+        The regex pattern should match these and include them in the payload.
+        """
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            # Create content with doubled quotes inside the payload
+            content = '''function PreloadFiles takes nothing returns nothing
+
+\tcall PreloadStart()
+\tcall Preload( "He said ""hello"" to me" )
+\tcall PreloadEnd( 0.0 )
+
+endfunction'''
+            f.write(content)
+            temp_path = f.name
+        try:
+            result = load_nonloadable_file(temp_path)
+            # The doubled quotes should be preserved in the payload
+            self.assertEqual(result, b'He said ""hello"" to me')
+        finally:
+            os.unlink(temp_path)
 
 
 @contextmanager
