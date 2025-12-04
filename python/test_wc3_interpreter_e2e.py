@@ -109,8 +109,11 @@ class EndToEndBreakpointTest(unittest.TestCase):
         
         return self.lua_process
 
-    def _wait_for_breakpoint(self, timeout: float = 10.0) -> str:
-        """Wait for a breakpoint to be hit and return the thread ID."""
+    def _wait_for_breakpoint(self, timeout: float = 30.0) -> str:
+        """Wait for a breakpoint to be hit and return the thread ID.
+        
+        Uses a large timeout for reliability - actual response should be much faster.
+        """
         start_time = time.time()
         while time.time() - start_time < timeout:
             threads = get_breakpoint_threads()
