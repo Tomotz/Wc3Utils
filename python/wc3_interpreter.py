@@ -505,22 +505,6 @@ def _cleanup_breakpoint_state(current_threads: set) -> None:
             del last_seen_bp_id[tid]
 
 
-def bp_list_threads() -> None:
-    """List all threads currently in a breakpoint."""
-    threads = get_breakpoint_threads()
-    if not threads:
-        print("No threads currently in a breakpoint.")
-        return
-    print(f"Threads in breakpoint ({len(threads)}):")
-    for thread_id in threads:
-        info = get_breakpoint_info(thread_id.decode('utf-8', errors='replace'))
-        if info:
-            bp_id = info.get('bp_id', 'unknown')
-            print(f"  {thread_id}: breakpoint '{bp_id}'")
-        else:
-            print(f"  {thread_id}: (no info available)")
-
-
 def bp_show_info(thread_id: str):
     """Show detailed breakpoint info for a specific thread."""
     info = get_breakpoint_info(thread_id)
@@ -547,65 +531,7 @@ def bp_show_info(thread_id: str):
 # Breakpoint Command Functions (interact with game)
 # ============================================================================
 
-def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
-    """Send a command to a specific breakpoint thread and wait for response.
-
-    Uses per-thread incrementing bp_in_<thread_id>_<idx>.txt files due to WC3 file caching.
-    File content is just the raw command (no prefix needed since thread_id is in filename).
-    Response: thread_id:cmd_index\\nresult <- bp_out.txt
-    """
-    global bp_command_indices
-
-    if thread_id not in bp_command_indices:
-        bp_command_indices[thread_id] = 0
-
-    cmd_index = bp_command_indices[thread_id]
-
-    # Write command to bp_in_<thread_id>_<cmd_index>.txt
-    # File content is just the raw command (thread_id is in filename)
-    filename = os.path.join(FILES_ROOT, f"bp_in_{thread_id}_{cmd_index}.txt")
-    create_file(filename, command)
-
-    # Wait for response in bp_out.txt
-    expected_prefix = f"{thread_id}:{cmd_index}"
-    start_time = time.time()
-    timeout = 60  # Large timeout for reliability - actual response should be much faster
-    debug = os.environ.get('WC3_E2E_DEBUG')
-
-    if debug:
-        print(f"[DEBUG] send_breakpoint_command: thread_id={thread_id}, cmd_index={cmd_index}")
-        print(f"[DEBUG] Wrote command to: {filename}")
-        print(f"[DEBUG] Waiting for response with prefix: {expected_prefix}")
-
-    while time.time() - start_time < timeout:
-        bp_out_file = os.path.join(FILES_ROOT, "bp_out.txt")
-        if os.path.exists(bp_out_file):
-            # Breakpoint output files are saved with isLoadable=False and mirrored to disk by the test harness
-            content = load_nonloadable_file(bp_out_file)
-            if content:
-                index, result = parse_indexed_output(content)
-                if debug:
-                    print(f"[DEBUG] bp_out.txt content (first 100 bytes): {content[:100]}")
-                    print(f"[DEBUG] Parsed index: {index}, expected: {expected_prefix}")
-                if index and index.decode('utf-8', errors='replace') == expected_prefix:
-                    bp_command_indices[thread_id] = cmd_index + 1
-                    if debug:
-                        print(f"[DEBUG] Got matching response!")
-                    return result.decode('utf-8', errors='replace') if result else None
-        time.sleep(0.1)
-
-    if debug:
-        print(f"[DEBUG] TIMEOUT waiting for {expected_prefix}")
-        print(f"[DEBUG] bp_out.txt exists: {os.path.exists(bp_out_file)}")
-        if os.path.exists(bp_out_file):
-            content = load_nonloadable_file(bp_out_file)
-            print(f"[DEBUG] Final bp_out.txt content: {content}")
-
-    assert(time.time() - start_time < timeout)
-    return None
-
-
-def breakpoint_monitor_thread() -> None:
+def breakpoint_monitor_thread()-> None:
     """Background thread that monitors for new breakpoint threads.
 
     This thread handles breakpoint state management and prints BREAKPOINT HIT messages
@@ -684,97 +610,7 @@ def print_breakpoint_hit(thread_id: str, info: Dict[str, any]) -> None:
     print(f"{nextFile} >>> ", flush=True, end='')
 
 
-def handle_breakpoint_command(cmd: str) -> bool:
-    """Handle a command in breakpoint context.
-
-    Returns True if we should continue in breakpoint mode, False if exiting to normal mode.
-    """
-    global current_breakpoint, pending_breakpoints
-
-    with bp_state_lock:
-        if current_breakpoint is None:
-            return False
-
-        thread_id, info = current_breakpoint
-
-    if cmd == "help":
-        print("Breakpoint mode commands:")
-        print("  list      - List all threads in breakpoint (current marked with *)")
-        print("  thread <id> - Switch to a different breakpoint thread")
-        print("  info      - Show detailed info for current thread")
-        print("  continue  - Resume execution of current thread")
-        print("  help      - Show this help message")
-        print("  <lua>     - Execute Lua code in the breakpoint environment")
-        return True
-
-    if cmd == "list":
-        threads = get_breakpoint_threads()
-        if not threads:
-            print("No threads currently in a breakpoint.")
-        else:
-            print(f"Threads in breakpoint ({len(threads)}):")
-            for tid in threads:
-                tid_str = tid.decode('utf-8', errors='replace')
-                bp_info = get_breakpoint_info(tid_str)
-                bp_name = bp_info.get('bp_id', 'unknown') if bp_info else 'unknown'
-                marker = " *" if tid_str == thread_id else ""
-                print(f"  {tid_str}: breakpoint '{bp_name}'{marker}")
-        return True
-
-    if cmd.startswith("thread "):
-        new_thread_id = cmd[7:].strip()
-        threads = get_breakpoint_threads()
-        threads_str = [t.decode('utf-8', errors='replace') for t in threads]
-        if new_thread_id in threads_str:
-            new_info = get_breakpoint_info(new_thread_id)
-            if new_info:
-                current_breakpoint = (new_thread_id, new_info)
-                print(f"Switched to thread {new_thread_id}")
-                print(f"Breakpoint: {new_info.get('bp_id', 'unknown')}")
-                new_locals = new_info.get('locals', [])
-                if new_locals:
-                    print(f"Local variables: {b', '.join(new_locals)}")
-            else:
-                print(f"Switched to thread {new_thread_id} (no info available)")
-                current_breakpoint = (new_thread_id, {'thread_id': new_thread_id})
-        else:
-            print(f"Thread '{new_thread_id}' not found in breakpoint.")
-            print(f"Available threads: {', '.join(threads_str) if threads_str else 'none'}")
-        return True
-
-    if cmd == "info":
-        bp_show_info(thread_id)
-        return True
-
-    if cmd == "continue":
-        response = send_breakpoint_command(thread_id, "continue")
-        print(f"Resuming thread {thread_id}...")
-
-        # Move to next pending breakpoint if any
-        with bp_state_lock:
-            if pending_breakpoints:
-                next_bp = pending_breakpoints.pop(0)
-                current_breakpoint = next_bp
-                print_breakpoint_hit(next_bp[0], next_bp[1])
-                if pending_breakpoints:
-                    print(f"[{len(pending_breakpoints)} more breakpoint(s) pending]")
-                return True
-            else:
-                # No more breakpoints - return to normal mode
-                current_breakpoint = None
-                print("[Returning to normal command mode]")
-                return False
-
-    # Send Lua command to game
-    response = send_breakpoint_command(thread_id, cmd)
-    if response is not None:
-        print(response)
-    else:
-        print("(no response or timeout)")
-    return True
-
-
-def get_prompt() -> str:
+def get_prompt()-> str:
     """Get the appropriate prompt based on current context."""
     with bp_state_lock:
         if current_breakpoint is not None:
@@ -794,50 +630,121 @@ def signal_handler(sig: int, frame) -> None:
 nextFile: int = 0
 send_lock: threading.Lock = threading.Lock()  # Thread safety for nextFile and file I/O
 
-def send_data_to_game(data: str, print_prompt_after: bool = False):
+def send_data_to_game(data: str, print_prompt_after: bool = False) -> Optional[str]:
     """Send data to the game and wait for response. Thread-safe.
 
-    Uses single out.txt file with format: "{index}\\n{result}"
+    This is the unified interface for both normal and breakpoint modes.
+    - In normal mode: Uses in{N}.txt and out.txt with format "{index}\\n{result}"
+    - In breakpoint mode: Uses bp_in_{thread_id}_{idx}.txt and bp_out.txt with format "{thread_id}:{cmd_index}\\n{result}"
 
     Args:
         data: The Lua code to send to the game
         print_prompt_after: If True, print the prompt after the result (used for file/watch commands)
+
+    Returns:
+        The result string from the game, or None if no response/timeout
     """
-    global nextFile
+    global nextFile, bp_command_indices, current_breakpoint
     if data == "":
-        return
+        return None
+
     with send_lock:
-        create_file(os.path.join(FILES_ROOT, f"in{nextFile}.txt"), data)
+        # Check if we're in breakpoint context
+        with bp_state_lock:
+            in_breakpoint = current_breakpoint is not None
+            if in_breakpoint:
+                thread_id = current_breakpoint[0]
 
-        # Wait for response in out.txt with matching index
-        out_file = os.path.join(FILES_ROOT, "out.txt")
-        start_time = time.time()
-        timeout = 60.0  # 60 second timeout
+        if in_breakpoint:
+            # Breakpoint mode: use bp_in/bp_out files
+            if thread_id not in bp_command_indices:
+                bp_command_indices[thread_id] = 0
 
-        while time.time() - start_time < timeout:
-            if os.path.exists(out_file):
-                try:
-                    content = load_file(out_file)
+            cmd_index = bp_command_indices[thread_id]
+
+            # Write command to bp_in_<thread_id>_<cmd_index>.txt
+            filename = os.path.join(FILES_ROOT, f"bp_in_{thread_id}_{cmd_index}.txt")
+            create_file(filename, data)
+
+            # Wait for response in bp_out.txt
+            expected_prefix = f"{thread_id}:{cmd_index}"
+            start_time = time.time()
+            timeout = 60.0
+            debug = os.environ.get('WC3_E2E_DEBUG')
+
+            if debug:
+                print(f"[DEBUG] send_data_to_game (breakpoint): thread_id={thread_id}, cmd_index={cmd_index}")
+                print(f"[DEBUG] Wrote command to: {filename}")
+                print(f"[DEBUG] Waiting for response with prefix: {expected_prefix}")
+
+            while time.time() - start_time < timeout:
+                bp_out_file = os.path.join(FILES_ROOT, "bp_out.txt")
+                if os.path.exists(bp_out_file):
+                    content = load_nonloadable_file(bp_out_file)
                     if content:
                         index, result = parse_indexed_output(content)
-                        if index == str(nextFile).encode('utf-8'):
-                            if result != b"nil":
-                                print(result.decode('utf-8', errors='replace'))
-                            nextFile += 1
+                        if debug:
+                            print(f"[DEBUG] bp_out.txt content (first 100 bytes): {content[:100]}")
+                            print(f"[DEBUG] Parsed index: {index}, expected: {expected_prefix}")
+                        if index and index.decode('utf-8', errors='replace') == expected_prefix:
+                            bp_command_indices[thread_id] = cmd_index + 1
+                            if debug:
+                                print(f"[DEBUG] Got matching response!")
+                            result_str = result.decode('utf-8', errors='replace') if result else None
+                            if result_str and result_str != "nil":
+                                print(result_str)
                             if print_prompt_after:
-                                print(f"{nextFile} >>> ", end="", flush=True)
-                            return
-                except Exception as e:
-                    print("failed. Got exception: ", e)
-                    traceback.print_exc()
-                    nextFile += 1
-                    return
-            time.sleep(0.1)
+                                print(get_prompt(), end="", flush=True)
+                            return result_str
+                time.sleep(0.1)
 
-        print(f"Timeout waiting for response to command {nextFile}")
-        nextFile += 1
-        if print_prompt_after:
-            print(f"{nextFile} >>> ", end="", flush=True)
+            if debug:
+                print(f"[DEBUG] TIMEOUT waiting for {expected_prefix}")
+                bp_out_file = os.path.join(FILES_ROOT, "bp_out.txt")
+                print(f"[DEBUG] bp_out.txt exists: {os.path.exists(bp_out_file)}")
+                if os.path.exists(bp_out_file):
+                    content = load_nonloadable_file(bp_out_file)
+                    print(f"[DEBUG] Final bp_out.txt content: {content}")
+
+            print(f"Timeout waiting for breakpoint response")
+            if print_prompt_after:
+                print(get_prompt(), end="", flush=True)
+            return None
+        else:
+            # Normal mode: use in/out files
+            create_file(os.path.join(FILES_ROOT, f"in{nextFile}.txt"), data)
+
+            # Wait for response in out.txt with matching index
+            out_file = os.path.join(FILES_ROOT, "out.txt")
+            start_time = time.time()
+            timeout = 60.0  # 60 second timeout
+
+            while time.time() - start_time < timeout:
+                if os.path.exists(out_file):
+                    try:
+                        content = load_file(out_file)
+                        if content:
+                            index, result = parse_indexed_output(content)
+                            if index == str(nextFile).encode('utf-8'):
+                                result_str = result.decode('utf-8', errors='replace') if result else None
+                                if result_str and result_str != "nil":
+                                    print(result_str)
+                                nextFile += 1
+                                if print_prompt_after:
+                                    print(get_prompt(), end="", flush=True)
+                                return result_str
+                    except Exception as e:
+                        print("failed. Got exception: ", e)
+                        traceback.print_exc()
+                        nextFile += 1
+                        return None
+                time.sleep(0.1)
+
+            print(f"Timeout waiting for response to command {nextFile}")
+            nextFile += 1
+            if print_prompt_after:
+                print(get_prompt(), end="", flush=True)
+            return None
 
 def send_file_to_game(filepath: str) -> None:
     """Send a file to the game with OnInit wrapper applied. Used by both 'file' command and watch callbacks."""
@@ -853,6 +760,59 @@ def send_file_to_game(filepath: str) -> None:
 
     print(f"Sending file {filepath} to game")
     send_data_to_game(data, print_prompt_after=True)
+
+def handle_continue_command() -> None:
+    """Handle the 'continue' command to resume execution of current breakpoint thread."""
+    global current_breakpoint, pending_breakpoints
+
+    with bp_state_lock:
+        if current_breakpoint is None:
+            print("Not in a breakpoint context.")
+            return
+        thread_id = current_breakpoint[0]
+
+    # Send continue command to game via unified interface
+    send_data_to_game("continue")
+    print(f"Resuming thread {thread_id}...")
+
+    # Move to next pending breakpoint if any
+    with bp_state_lock:
+        if pending_breakpoints:
+            next_bp = pending_breakpoints.pop(0)
+            current_breakpoint = next_bp
+            print_breakpoint_hit(next_bp[0], next_bp[1])
+            if pending_breakpoints:
+                print(f"[{len(pending_breakpoints)} more breakpoint(s) pending]")
+        else:
+            # No more breakpoints - clear current context
+            current_breakpoint = None
+            print("[Returned to normal command mode]")
+
+
+def handle_thread_command(new_thread_id: str) -> None:
+    """Handle the 'thread <id>' command to switch to a different breakpoint thread."""
+    global current_breakpoint
+
+    threads = get_breakpoint_threads()
+    threads_str = [t.decode('utf-8', errors='replace') for t in threads]
+    if new_thread_id in threads_str:
+        new_info = get_breakpoint_info(new_thread_id)
+        if new_info:
+            with bp_state_lock:
+                current_breakpoint = (new_thread_id, new_info)
+            print(f"Switched to thread {new_thread_id}")
+            print(f"Breakpoint: {new_info.get('bp_id', 'unknown')}")
+            new_locals = new_info.get('locals', [])
+            if new_locals:
+                print(f"Local variables: {b', '.join(new_locals)}")
+        else:
+            print(f"Switched to thread {new_thread_id} (no info available)")
+            with bp_state_lock:
+                current_breakpoint = (new_thread_id, {'thread_id': new_thread_id})
+    else:
+        print(f"Thread '{new_thread_id}' not found in breakpoint.")
+        print(f"Available threads: {', '.join(threads_str) if threads_str else 'none'}")
+
 
 def main() -> None:
     global nextFile, bp_command_indices, current_breakpoint, pending_breakpoints
@@ -883,15 +843,13 @@ def main() -> None:
         if cmd == "":
             continue
 
-        # If we're in breakpoint context, route commands there
+        # Check if we're in breakpoint context for context-aware help
         with bp_state_lock:
             in_bp_mode = current_breakpoint is not None
-        if in_bp_mode:
-            # Handle breakpoint-specific commands
-            handle_breakpoint_command(cmd)
-            continue
+            if in_bp_mode:
+                thread_id = current_breakpoint[0]
 
-        # Normal mode command handling
+        # Unified command handling - same commands work in both modes
         if cmd == "exit":
             stop_breakpoint_monitor()
             stop_all_watchers()
@@ -907,15 +865,15 @@ def main() -> None:
             print("  watch <full file path> - watch a file for changes and automatically send it to the game on each update")
             print("  unwatch <full file path> - stop watching a file")
             print("  watching - list all files currently being watched")
-            print("  bp list - list all threads currently in a breakpoint")
-            print("  bp info <thread_id> - show detailed info for a breakpoint thread")
+            print("  list - list all threads currently in a breakpoint (current marked with *)")
+            print("  thread <id> - switch to a different breakpoint thread")
+            print("  info - show detailed info for current breakpoint thread")
+            print("  continue - resume execution of current breakpoint thread")
             print("  <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.")
             print("** Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **")
             print("** Note: OnInit calls in files sent via 'file' or 'watch' are automatically executed immediately **")
-            print("\nBreakpoint support:")
-            print("  When a Breakpoint() is hit in your Lua code, the prompt will change to 'bp:...'.")
-            print("  In breakpoint mode, type 'help' for available commands (list, thread, info, continue).")
-            print("  You can also query breakpoint data without entering breakpoint mode using 'bp list' and 'bp info'.")
+            if in_bp_mode:
+                print(f"\n[Currently in breakpoint context: thread {thread_id}]")
             continue
         elif cmd == "restart":
             stop_breakpoint_monitor()
@@ -946,15 +904,38 @@ def main() -> None:
             filepath = cmd[5:].strip()
             send_file_to_game(filepath)
             continue
-        elif cmd == "bp list":
-            bp_list_threads()
+        elif cmd == "list":
+            # List all threads in breakpoint (with current marked)
+            threads = get_breakpoint_threads()
+            if not threads:
+                print("No threads currently in a breakpoint.")
+            else:
+                print(f"Threads in breakpoint ({len(threads)}):")
+                for tid in threads:
+                    tid_str = tid.decode('utf-8', errors='replace')
+                    bp_info = get_breakpoint_info(tid_str)
+                    bp_name = bp_info.get('bp_id', 'unknown') if bp_info else 'unknown'
+                    marker = " *" if in_bp_mode and tid_str == thread_id else ""
+                    print(f"  {tid_str}: breakpoint '{bp_name}'{marker}")
             continue
-        elif cmd.startswith("bp info "):
-            thread_id = cmd[8:].strip()
-            bp_show_info(thread_id)
+        elif cmd.startswith("thread "):
+            new_thread_id = cmd[7:].strip()
+            handle_thread_command(new_thread_id)
+            continue
+        elif cmd == "info":
+            if in_bp_mode:
+                bp_show_info(thread_id)
+            else:
+                print("Not in a breakpoint context. Use 'list' to see available threads.")
+            continue
+        elif cmd == "continue":
+            if in_bp_mode:
+                handle_continue_command()
+            else:
+                print("Not in a breakpoint context.")
             continue
         else:
-            # Send Lua command to game
+            # Send Lua command to game via unified interface
             send_data_to_game(cmd)
 
 if __name__ == "__main__":
