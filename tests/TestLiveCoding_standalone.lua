@@ -47,6 +47,10 @@ print("=== Libraries loaded successfully ===\n")
 -- Track the current file index (mirrors nextFile in LiveCoding.lua)
 local currentFileIndex = 0
 
+-- Track breakpoint input file index (maps threadId -> next index)
+-- Declared here so it can be reset in resetState()
+local bpCommandIndices = {}
+
 -- Test helper to reset state between tests
 local function resetState()
     -- Reset game status
@@ -56,6 +60,15 @@ local function resetState()
     EnabledBreakpoints = {}
     -- Clear any running coroutines
     clearRunningCoroutines()
+    -- Clear breakpoint-related files from mock file system (but not interpreter input files)
+    clearFilesMatching("bp_threads")
+    clearFilesMatching("bp_data_")
+    clearFilesMatching("bp_out")
+    clearFilesMatching("bp_in_")
+    -- Reset breakpoint command indices
+    for k in pairs(bpCommandIndices) do
+        bpCommandIndices[k] = nil
+    end
 end
 
 -- Helper to get the next file index and increment it
@@ -428,10 +441,6 @@ end
 -- Field separator for breakpoint data files (ASCII 31 = unit separator)
 -- Must match FIELD_SEP in LiveCoding.lua
 local FIELD_SEP = string.char(31)
-
--- Track breakpoint input file index (matches nextBpFile in LiveCoding.lua)
--- Per-thread command indices for bp_in files (maps threadId -> next index)
-local bpCommandIndices = {}
 
 -- Helper to get breakpoint data for a specific thread
 -- Returns a table with bp_id, locals (list derived from locals_values keys), stack, and locals_values (table)
@@ -1016,6 +1025,225 @@ function test_Breakpoint_variable_modification()
 end
 
 -- ============================================================================
+-- Test: Four sequential breakpoints with conditions
+-- Tests:
+-- 1. Breakpoint 1 (no condition) - hit, modify counter=1, message="bp1"
+-- 2. Breakpoint 2 (condition: "return true" - always hit) - verify counter=1, modify counter=2, message="bp2"
+-- 3. Breakpoint 3 (condition: "return false" - always skipped) - should NOT block
+-- 4. Breakpoint 4 (no condition) - verify counter=2 (unchanged from bp2), modify counter=3, message="bp4"
+-- Verifies:
+-- - Breakpoints are hit in order
+-- - Breakpoints are not skipped before we send continue
+-- - Conditional breakpoints work (true condition blocks, false condition skips)
+-- - Local values can be queried and modified
+-- - Modified values persist to the next breakpoint
+-- ============================================================================
+
+function test_Breakpoint_four_sequential_with_conditions()
+    print("\n--- Running test_Breakpoint_four_sequential_with_conditions ---")
+    resetState()
+
+    -- Enable interpreter
+    GameStatus = GAME_STATUS_OFFLINE
+    bj_isSinglePlayer = true
+    TryInterpret(0.01)
+
+    local testComplete = false
+    local finalCounter = nil
+    local finalMessage = nil
+
+    -- Create a coroutine that hits 4 breakpoints in sequence
+    local co = coroutine.create(function()
+        local counter = 0
+        local message = "start"
+
+        -- Breakpoint 1: No condition, should hit
+        -- Use new array format: {{"name", value}, ...}
+        counter, message = Breakpoint("seq_bp_1", {{"counter", counter}, {"message", message}})
+
+        -- Breakpoint 2: Condition "return true" - always hit
+        counter, message = Breakpoint("seq_bp_2", {{"counter", counter}, {"message", message}}, "return true")
+
+        -- Breakpoint 3: Condition "return false" - always skipped
+        counter, message = Breakpoint("seq_bp_3", {{"counter", counter}, {"message", message}}, "return false")
+
+        -- Breakpoint 4: No condition, should hit
+        counter, message = Breakpoint("seq_bp_4", {{"counter", counter}, {"message", message}})
+
+        finalCounter = counter
+        finalMessage = message
+        testComplete = true
+    end)
+
+    -- Start the coroutine
+    coroutine.resume(co)
+
+    -- Advance time to let the first breakpoint write its output
+    TriggerSleepAction(0.1)
+
+    -- ========== Breakpoint 1: Verify initial values and modify ==========
+    local threadId, bpData = findThreadWithBreakpoint("seq_bp_1")
+    Debug.assert(threadId ~= nil, "Should find thread in seq_bp_1 breakpoint")
+    Debug.assert(bpData ~= nil, "Breakpoint data file should exist for seq_bp_1")
+    Debug.assert(bpData.bp_id == "seq_bp_1", "bp_id should be 'seq_bp_1'")
+
+    -- Verify initial values
+    Debug.assert(bpData.locals_values["counter"] == "0",
+        "counter should be 0 at bp1, got: " .. tostring(bpData.locals_values["counter"]))
+    Debug.assert(bpData.locals_values["message"] == "start",
+        "message should be 'start' at bp1, got: " .. tostring(bpData.locals_values["message"]))
+
+    -- Query counter value via command
+    local cmdIdx = bpCommandIndices[threadId] or 0
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "return counter")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()
+
+    local bpOutContent = getRawFileContent("Interpreter\\bp_out.txt")
+    Debug.assert(bpOutContent ~= nil, "bp_out.txt should exist after command")
+    local outIndex, outResult = bpOutContent:match("^([^\n]+)\n(.*)$")
+    Debug.assert(outResult == "0", "return counter at bp1 should give 0, got: " .. tostring(outResult))
+
+    -- Modify counter to 1 and message to "bp1"
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "counter = 1")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()
+
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", 'message = "bp1"')
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()
+
+    -- Verify modifications
+    bpData = getBreakpointData(threadId)
+    Debug.assert(bpData.locals_values["counter"] == "1",
+        "counter should be 1 after modification at bp1, got: " .. tostring(bpData.locals_values["counter"]))
+    Debug.assert(bpData.locals_values["message"] == "bp1",
+        "message should be 'bp1' after modification at bp1, got: " .. tostring(bpData.locals_values["message"]))
+
+    -- Clear bp_in files from bp1 BEFORE sending continue, so bp2 doesn't read them
+    -- (Each Breakpoint() call starts cmdIndex at 0, so old files would be read)
+    -- We need to clear them before the coroutine resumes and hits bp2
+    clearFilesMatching("bp_in_")
+
+    -- Continue from breakpoint 1
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "continue")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.6)
+    resumeOneCoroutine()
+
+    -- ========== Breakpoint 2: Verify values from bp1 and modify ==========
+    -- Breakpoint 2 has condition "return true" so it should hit
+    TriggerSleepAction(0.1)
+    threadId, bpData = findThreadWithBreakpoint("seq_bp_2")
+    Debug.assert(threadId ~= nil, "Should find thread in seq_bp_2 breakpoint (condition 'return true' should hit)")
+    Debug.assert(bpData ~= nil, "Breakpoint data file should exist for seq_bp_2")
+    Debug.assert(bpData.bp_id == "seq_bp_2", "bp_id should be 'seq_bp_2'")
+
+    -- Verify values persisted from bp1
+    Debug.assert(bpData.locals_values["counter"] == "1",
+        "counter should be 1 at bp2 (from bp1), got: " .. tostring(bpData.locals_values["counter"]))
+    Debug.assert(bpData.locals_values["message"] == "bp1",
+        "message should be 'bp1' at bp2 (from bp1), got: " .. tostring(bpData.locals_values["message"]))
+
+    -- Reset command index for new breakpoint (each Breakpoint() call starts cmdIndex at 0)
+    bpCommandIndices[threadId] = 0
+
+    -- Modify counter to 2 and message to "bp2"
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "counter = 2")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()
+
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", 'message = "bp2"')
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()
+
+    -- Verify modifications
+    bpData = getBreakpointData(threadId)
+    Debug.assert(bpData.locals_values["counter"] == "2",
+        "counter should be 2 after modification at bp2, got: " .. tostring(bpData.locals_values["counter"]))
+    Debug.assert(bpData.locals_values["message"] == "bp2",
+        "message should be 'bp2' after modification at bp2, got: " .. tostring(bpData.locals_values["message"]))
+
+    -- Clear bp_in files from bp2 BEFORE sending continue, so bp4 doesn't read them
+    -- (bp3 is skipped due to false condition, so we go directly to bp4)
+    clearFilesMatching("bp_in_")
+
+    -- Continue from breakpoint 2
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "continue")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.6)
+    resumeOneCoroutine()
+
+    -- ========== Breakpoint 3: Should be SKIPPED (condition "return false") ==========
+    -- The coroutine should pass through bp3 without blocking and hit bp4
+    TriggerSleepAction(0.1)
+
+    -- Verify bp3 was NOT hit (no thread should be at seq_bp_3)
+    local bp3ThreadId, bp3Data = findThreadWithBreakpoint("seq_bp_3")
+    Debug.assert(bp3ThreadId == nil, "seq_bp_3 should NOT trigger (condition 'return false' should skip)")
+
+    -- ========== Breakpoint 4: Verify values from bp2 (bp3 was skipped) and modify ==========
+    threadId, bpData = findThreadWithBreakpoint("seq_bp_4")
+    Debug.assert(threadId ~= nil, "Should find thread in seq_bp_4 breakpoint")
+    Debug.assert(bpData ~= nil, "Breakpoint data file should exist for seq_bp_4")
+    Debug.assert(bpData.bp_id == "seq_bp_4", "bp_id should be 'seq_bp_4'")
+
+    -- Verify values persisted from bp2 (bp3 was skipped, so values unchanged)
+    Debug.assert(bpData.locals_values["counter"] == "2",
+        "counter should be 2 at bp4 (from bp2, bp3 skipped), got: " .. tostring(bpData.locals_values["counter"]))
+    Debug.assert(bpData.locals_values["message"] == "bp2",
+        "message should be 'bp2' at bp4 (from bp2, bp3 skipped), got: " .. tostring(bpData.locals_values["message"]))
+
+    -- Reset command index for new breakpoint (each Breakpoint() call starts cmdIndex at 0)
+    bpCommandIndices[threadId] = 0
+
+    -- Modify counter to 3 and message to "bp4"
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "counter = 3")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()
+
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", 'message = "bp4"')
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.2)
+    resumeOneCoroutine()
+
+    -- Verify modifications
+    bpData = getBreakpointData(threadId)
+    Debug.assert(bpData.locals_values["counter"] == "3",
+        "counter should be 3 after modification at bp4, got: " .. tostring(bpData.locals_values["counter"]))
+    Debug.assert(bpData.locals_values["message"] == "bp4",
+        "message should be 'bp4' after modification at bp4, got: " .. tostring(bpData.locals_values["message"]))
+
+    -- Continue from breakpoint 4
+    cmdIdx = bpCommandIndices[threadId]
+    FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "continue")
+    bpCommandIndices[threadId] = cmdIdx + 1
+    TriggerSleepAction(0.6)
+    resumeOneCoroutine()
+
+    -- ========== Verify final values ==========
+    Debug.assert(testComplete, "Test function should have completed after all breakpoints")
+    Debug.assert(finalCounter == 3, "Final counter should be 3, got: " .. tostring(finalCounter))
+    Debug.assert(finalMessage == "bp4", "Final message should be 'bp4', got: " .. tostring(finalMessage))
+
+    print("--- test_Breakpoint_four_sequential_with_conditions completed ---")
+end
+
+-- ============================================================================
 -- Run all tests
 -- ============================================================================
 
@@ -1055,6 +1283,9 @@ test_Breakpoint_dynamic_enable_disable()
 
 -- Variable modification test (new feature)
 test_Breakpoint_variable_modification()
+
+-- Four sequential breakpoints with conditions test
+test_Breakpoint_four_sequential_with_conditions()
 
 print("\n============================================================")
 print("ALL LIVECODING TESTS PASSED!")
