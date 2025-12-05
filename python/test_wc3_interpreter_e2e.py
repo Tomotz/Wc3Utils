@@ -27,12 +27,25 @@ from wc3_interpreter import (
     load_nonloadable_file,
     get_breakpoint_threads,
     get_breakpoint_info,
-    send_breakpoint_command,
+    send_data_to_game,
     bp_command_indices,
+    bp_state_lock,
     last_seen_bp_id,
     _is_new_breakpoint,
     _cleanup_breakpoint_state,
 )
+
+
+def send_breakpoint_command(thread_id: str, command: str):
+    """Test helper that sets breakpoint context and calls send_data_to_game.
+    
+    In tests we don't have the monitor thread; we drive the context directly.
+    This helper sets current_breakpoint to the given thread_id, then calls
+    send_data_to_game which will route via bp_in/bp_out based on that context.
+    """
+    with bp_state_lock:
+        wc3_interpreter.current_breakpoint = (thread_id, {"thread_id": thread_id})
+    return send_data_to_game(command)
 
 
 def wait_for_new_breakpoint(timeout: float = 30.0):
@@ -94,6 +107,9 @@ class EndToEndBreakpointTest(unittest.TestCase):
         bp_command_indices.clear()
         # Reset last seen bp_id state for each test to ensure clean detection
         last_seen_bp_id.clear()
+        # Reset breakpoint context for each test to ensure clean slate
+        wc3_interpreter.current_breakpoint = None
+        wc3_interpreter.pending_breakpoints = []
         self.lua_process = None
         self.lua_output = []
         self.lua_thread = None
