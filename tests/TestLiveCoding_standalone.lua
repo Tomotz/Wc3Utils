@@ -60,15 +60,13 @@ local function resetState()
     EnabledBreakpoints = {}
     -- Clear any running coroutines
     clearRunningCoroutines()
-    -- Clear breakpoint-related files from mock file system (but not interpreter input files)
+    -- Clear breakpoint metadata files (but NOT bp_in_* files or bpCommandIndices)
+    -- The library uses a monotonic per-thread command index that persists across Breakpoint() calls,
+    -- so we must NOT clear bp_in_* files or reset bpCommandIndices - they need to stay in sync
+    -- with the library's internal nextBreakpointCmdIndex table
     clearFilesMatching("bp_threads")
     clearFilesMatching("bp_data_")
     clearFilesMatching("bp_out")
-    clearFilesMatching("bp_in_")
-    -- Reset breakpoint command indices
-    for k in pairs(bpCommandIndices) do
-        bpCommandIndices[k] = nil
-    end
 end
 
 -- Helper to get the next file index and increment it
@@ -1125,11 +1123,6 @@ function test_Breakpoint_four_sequential_with_conditions()
     Debug.assert(bpData.locals_values["message"] == "bp1",
         "message should be 'bp1' after modification at bp1, got: " .. tostring(bpData.locals_values["message"]))
 
-    -- Clear bp_in files from bp1 BEFORE sending continue, so bp2 doesn't read them
-    -- (Each Breakpoint() call starts cmdIndex at 0, so old files would be read)
-    -- We need to clear them before the coroutine resumes and hits bp2
-    clearFilesMatching("bp_in_")
-
     -- Continue from breakpoint 1
     cmdIdx = bpCommandIndices[threadId]
     FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "continue")
@@ -1151,10 +1144,8 @@ function test_Breakpoint_four_sequential_with_conditions()
     Debug.assert(bpData.locals_values["message"] == "bp1",
         "message should be 'bp1' at bp2 (from bp1), got: " .. tostring(bpData.locals_values["message"]))
 
-    -- Reset command index for new breakpoint (each Breakpoint() call starts cmdIndex at 0)
-    bpCommandIndices[threadId] = 0
-
     -- Modify counter to 2 and message to "bp2"
+    -- Note: Command index continues from bp1 (library tracks per-thread indices)
     cmdIdx = bpCommandIndices[threadId]
     FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "counter = 2")
     bpCommandIndices[threadId] = cmdIdx + 1
@@ -1173,10 +1164,6 @@ function test_Breakpoint_four_sequential_with_conditions()
         "counter should be 2 after modification at bp2, got: " .. tostring(bpData.locals_values["counter"]))
     Debug.assert(bpData.locals_values["message"] == "bp2",
         "message should be 'bp2' after modification at bp2, got: " .. tostring(bpData.locals_values["message"]))
-
-    -- Clear bp_in files from bp2 BEFORE sending continue, so bp4 doesn't read them
-    -- (bp3 is skipped due to false condition, so we go directly to bp4)
-    clearFilesMatching("bp_in_")
 
     -- Continue from breakpoint 2
     cmdIdx = bpCommandIndices[threadId]
@@ -1205,10 +1192,8 @@ function test_Breakpoint_four_sequential_with_conditions()
     Debug.assert(bpData.locals_values["message"] == "bp2",
         "message should be 'bp2' at bp4 (from bp2, bp3 skipped), got: " .. tostring(bpData.locals_values["message"]))
 
-    -- Reset command index for new breakpoint (each Breakpoint() call starts cmdIndex at 0)
-    bpCommandIndices[threadId] = 0
-
     -- Modify counter to 3 and message to "bp4"
+    -- Note: Command index continues from bp2 (library tracks per-thread indices)
     cmdIdx = bpCommandIndices[threadId]
     FileIO.Save("Interpreter\\bp_in_" .. threadId .. "_" .. cmdIdx .. ".txt", "counter = 3")
     bpCommandIndices[threadId] = cmdIdx + 1
