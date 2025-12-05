@@ -130,6 +130,7 @@ end
 local FIELD_SEP = string.char(31)
 
 local activeBreakpointThreads = {} ---@type table<string, boolean> -- Maps thread_id to true if in breakpoint
+local nextBreakpointCmdIndex = {} ---@type table<string, integer> -- Maps thread_id to next command index (persists across Breakpoint calls)
 
 --- Get a unique identifier for the current coroutine
 ---@return string
@@ -256,8 +257,8 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
 
     -- Main breakpoint loop - wait for commands
     -- Uses per-thread incrementing bp_in_<threadId>_<idx>.txt files due to WC3 file caching
-    -- Each thread has its own local command index to avoid clashing between breakpoints
-    local cmdIndex = 0
+    -- Command index persists across Breakpoint() calls for the same thread to avoid reading stale files
+    local cmdIndex = nextBreakpointCmdIndex[threadId] or 0
     while true do
         -- Check for commands in bp_in_<threadId>_<cmdIndex>.txt
         local filename = FILES_ROOT .. "\\bp_in_" .. threadId .. "_" .. cmdIndex .. ".txt"
@@ -267,6 +268,9 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
             if command == "continue" then
                 -- Acknowledge the continue command for the debugger protocol
                 writeIndexedOutput(FILES_ROOT .. "\\bp_out.txt", threadId .. ":" .. cmdIndex, "")
+                -- Advance and persist the index so next Breakpoint() for this thread starts fresh
+                cmdIndex = cmdIndex + 1
+                nextBreakpointCmdIndex[threadId] = cmdIndex
                 -- Clean up and exit breakpoint
                 activeBreakpointThreads[threadId] = nil
                 removeBreakpointDataFile(threadId)
@@ -295,7 +299,9 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
             -- Update breakpoint data file (in case locals changed)
             writeBreakpointDataFile(threadId, breakpointId, localVariables, env)
 
+            -- Advance and persist the index
             cmdIndex = cmdIndex + 1
+            nextBreakpointCmdIndex[threadId] = cmdIndex
         end
         TriggerSleepAction(0.1)
     end
