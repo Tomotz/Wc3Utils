@@ -333,6 +333,79 @@ local function test_breakpoint_disabled()
     print("Test completed successfully!")
 end
 
+-- Test: Four sequential breakpoints with conditions
+-- bp1: no condition, bp2: condition always true, bp3: condition always false (skipped), bp4: no condition
+local function test_breakpoint_four_sequential()
+    print("Starting breakpoint_four_sequential test...")
+
+    local testComplete = false
+    local finalCounter = nil
+    local finalMessage = nil
+    local co = coroutine.create(function()
+        local counter = 0
+        local message = "start"
+
+        -- bp1: no condition - should hit
+        print("About to hit bp1 with counter=" .. counter .. ", message=" .. message)
+        counter, message = Breakpoint("bp1", {{"counter", counter}, {"message", message}})
+        print("bp1 continued! counter=" .. tostring(counter) .. ", message=" .. tostring(message))
+
+        -- bp2: condition always true - should hit
+        print("About to hit bp2 with counter=" .. counter .. ", message=" .. message)
+        counter, message = Breakpoint("bp2", {{"counter", counter}, {"message", message}}, "return true")
+        print("bp2 continued! counter=" .. tostring(counter) .. ", message=" .. tostring(message))
+
+        -- bp3: condition always false - should be skipped
+        print("About to hit bp3 with counter=" .. counter .. ", message=" .. message)
+        counter, message = Breakpoint("bp3", {{"counter", counter}, {"message", message}}, "return false")
+        print("bp3 skipped (condition false)! counter=" .. tostring(counter) .. ", message=" .. tostring(message))
+
+        -- bp4: no condition - should hit
+        print("About to hit bp4 with counter=" .. counter .. ", message=" .. message)
+        counter, message = Breakpoint("bp4", {{"counter", counter}, {"message", message}})
+        print("bp4 continued! counter=" .. tostring(counter) .. ", message=" .. tostring(message))
+
+        finalCounter = counter
+        finalMessage = message
+        testComplete = true
+    end)
+
+    -- Start the coroutine
+    print("Starting coroutine...")
+    local success, err = coroutine.resume(co)
+    if not success then
+        error("Coroutine failed to start: " .. tostring(err))
+    end
+
+    -- The coroutine should now be waiting at bp1
+    print("Coroutine started, waiting for Python to interact...")
+
+    -- Poll and process timers/coroutines until test completes or timeout
+    -- Large timeout (60s) for reliability - actual response should be much faster
+    local maxIterations = 600  -- 60 seconds at 0.1s per iteration
+    local iteration = 0
+    while not testComplete and iteration < maxIterations do
+        -- Advance time and process timers/coroutines
+        TriggerSleepAction(0.1)
+        processTimersAndCoroutines()
+
+        -- Check if coroutine is dead (test failed to complete)
+        if coroutine.status(co) == "dead" and not testComplete then
+            break
+        end
+
+        -- Small sleep to avoid busy waiting (real time, not simulated)
+        os.execute("sleep 0.1")
+        iteration = iteration + 1
+    end
+
+    if not testComplete then
+        error("Test did not complete - breakpoint was not continued (iterations: " .. iteration .. ")")
+    end
+
+    print("Test completed successfully! finalCounter=" .. tostring(finalCounter) .. ", finalMessage=" .. tostring(finalMessage))
+end
+
 -- ============================================================================
 -- Main Entry Point
 -- ============================================================================
@@ -363,6 +436,8 @@ elseif testName == "breakpoint_disabled" then
     runTest("breakpoint_disabled", test_breakpoint_disabled)
 elseif testName == "breakpoint_variable_modification" then
     runTest("breakpoint_variable_modification", test_breakpoint_variable_modification)
+elseif testName == "breakpoint_four_sequential" then
+    runTest("breakpoint_four_sequential", test_breakpoint_four_sequential)
 else
     print("Unknown test: " .. testName)
     os.exit(1)

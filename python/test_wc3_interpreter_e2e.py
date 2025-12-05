@@ -253,6 +253,112 @@ class EndToEndBreakpointTest(unittest.TestCase):
         self.lua_process.wait(timeout=5)
         self.assertEqual(self.lua_process.returncode, 0)
 
+    def test_breakpoint_four_sequential_with_conditions(self):
+        """Test 4 sequential breakpoints with conditions.
+        
+        bp1: no condition - should hit
+        bp2: condition always true - should hit
+        bp3: condition always false - should be skipped
+        bp4: no condition - should hit
+        
+        Verifies:
+        - Breakpoints are hit in order
+        - Breakpoints are not skipped before we send continue
+        - Local values can be queried and modified at each breakpoint
+        - Modified values persist to the next breakpoint
+        """
+        # Start Lua harness with four-breakpoint test
+        self._start_lua_harness("breakpoint_four_sequential")
+        
+        # 1) Hit bp1
+        thread_id = self._wait_for_breakpoint()
+        self.assertIsNotNone(thread_id)
+        info = get_breakpoint_info(thread_id)
+        self.assertIsNotNone(info)
+        self.assertEqual(info.get('bp_id'), b'bp1')
+        locals_values = info.get('locals_values', {})
+        self.assertEqual(locals_values.get(b'counter'), b'0')
+        self.assertEqual(locals_values.get(b'message'), b'start')
+        
+        # Modify locals at bp1
+        result = send_breakpoint_command(thread_id, "counter = 1")
+        self.assertIsNotNone(result)
+        result = send_breakpoint_command(thread_id, "message = 'bp1'")
+        self.assertIsNotNone(result)
+        
+        # Verify the changes via return
+        result = send_breakpoint_command(thread_id, "return counter")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.strip(), "1")
+        result = send_breakpoint_command(thread_id, "return message")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.strip(), "bp1")
+        
+        # Continue from bp1
+        send_breakpoint_command(thread_id, "continue")
+        
+        # 2) Hit bp2 (condition true, should block)
+        thread_id2 = self._wait_for_breakpoint()
+        self.assertEqual(thread_id2, thread_id)  # same coroutine/thread
+        info2 = get_breakpoint_info(thread_id2)
+        self.assertIsNotNone(info2)
+        self.assertEqual(info2.get('bp_id'), b'bp2')
+        locals_values2 = info2.get('locals_values', {})
+        # Values should be what we set at bp1
+        self.assertEqual(locals_values2.get(b'counter'), b'1')
+        self.assertEqual(locals_values2.get(b'message'), b'bp1')
+        
+        # Modify locals at bp2
+        result = send_breakpoint_command(thread_id2, "counter = 2")
+        self.assertIsNotNone(result)
+        result = send_breakpoint_command(thread_id2, "message = 'bp2'")
+        self.assertIsNotNone(result)
+        
+        # Verify the changes
+        result = send_breakpoint_command(thread_id2, "return counter")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.strip(), "2")
+        result = send_breakpoint_command(thread_id2, "return message")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.strip(), "bp2")
+        
+        # Continue from bp2
+        send_breakpoint_command(thread_id2, "continue")
+        
+        # 3) bp3 has condition false, so it should be skipped.
+        # We should go directly to bp4 without seeing a new breakpoint in between.
+        thread_id4 = self._wait_for_breakpoint()
+        self.assertEqual(thread_id4, thread_id)  # same coroutine/thread
+        info4 = get_breakpoint_info(thread_id4)
+        self.assertIsNotNone(info4)
+        self.assertEqual(info4.get('bp_id'), b'bp4')  # bp3 was skipped
+        locals_values4 = info4.get('locals_values', {})
+        # Values should be what we set at bp2 (bp3 was skipped)
+        self.assertEqual(locals_values4.get(b'counter'), b'2')
+        self.assertEqual(locals_values4.get(b'message'), b'bp2')
+        
+        # Modify locals at bp4
+        result = send_breakpoint_command(thread_id4, "counter = 3")
+        self.assertIsNotNone(result)
+        result = send_breakpoint_command(thread_id4, "message = 'bp4'")
+        self.assertIsNotNone(result)
+        
+        # Verify the changes
+        result = send_breakpoint_command(thread_id4, "return counter")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.strip(), "3")
+        result = send_breakpoint_command(thread_id4, "return message")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.strip(), "bp4")
+        
+        # Continue from bp4
+        send_breakpoint_command(thread_id4, "continue")
+        
+        # Finally, ensure no breakpoints remain and Lua exits successfully
+        self.assertTrue(self._wait_for_no_breakpoint())
+        self.lua_process.wait(timeout=5)
+        self.assertEqual(self.lua_process.returncode, 0)
+
 
 class FileProtocolTest(unittest.TestCase):
     """Tests for the file protocol between Python and Lua."""
