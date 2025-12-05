@@ -29,9 +29,36 @@ from wc3_interpreter import (
     get_breakpoint_info,
     send_breakpoint_command,
     bp_command_indices,
-    wait_for_new_breakpoint,
     last_seen_bp_id,
+    _is_new_breakpoint,
+    _cleanup_breakpoint_state,
 )
+
+
+def wait_for_new_breakpoint(timeout: float = 30.0):
+    """Wait for a new breakpoint to be hit and return the thread ID.
+    
+    This test helper uses the same bp_id tracking logic as the production
+    breakpoint_monitor_thread via _is_new_breakpoint, ensuring consistent
+    detection of new breakpoints.
+    
+    Returns the thread_id (str) if a new breakpoint is detected, None on timeout.
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        threads = get_breakpoint_threads()
+        current_threads = set(threads)
+        for tid_bytes in current_threads:
+            thread_id = tid_bytes.decode('utf-8', errors='replace')
+            info = get_breakpoint_info(thread_id)
+            if not info:
+                continue
+            if _is_new_breakpoint(tid_bytes, info):
+                _cleanup_breakpoint_state(current_threads)
+                return thread_id
+        _cleanup_breakpoint_state(current_threads)
+        time.sleep(0.1)
+    return None
 
 
 def get_lua_harness_path() -> str:

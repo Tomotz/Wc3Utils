@@ -505,34 +505,6 @@ def _cleanup_breakpoint_state(current_threads: set) -> None:
             del last_seen_bp_id[tid]
 
 
-def wait_for_new_breakpoint(timeout: float = 30.0) -> Optional[str]:
-    """Wait for a new breakpoint to be hit and return the thread ID.
-    
-    This function uses the same bp_id tracking logic as the breakpoint monitor thread,
-    ensuring consistent detection of new breakpoints. It detects breakpoints by checking
-    if the bp_id for a thread has changed, not just if the thread is present.
-    
-    Uses a large timeout for reliability - actual response should be much faster.
-    
-    Returns the thread_id (str) if a new breakpoint is detected, None on timeout.
-    """
-    start = time.time()
-    while time.time() - start < timeout:
-        threads = get_breakpoint_threads()
-        current_threads = set(threads)
-        for tid_bytes in current_threads:
-            thread_id = tid_bytes.decode('utf-8', errors='replace')
-            info = get_breakpoint_info(thread_id)
-            if not info:
-                continue
-            if _is_new_breakpoint(tid_bytes, info):
-                _cleanup_breakpoint_state(current_threads)
-                return thread_id
-        _cleanup_breakpoint_state(current_threads)
-        time.sleep(0.1)
-    return None
-
-
 def bp_list_threads() -> None:
     """List all threads currently in a breakpoint."""
     threads = get_breakpoint_threads()
