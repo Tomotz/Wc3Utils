@@ -8,24 +8,22 @@ Or simply: python test_wc3_interpreter.py
 """
 
 import os
-import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 # Import the module under test
 import wc3_interpreter
 from wc3_interpreter import (
     load_file,
-    load_nonloadable_file,
+    parse_nonloadable_file,
     create_file,
     wrap_with_oninit_immediate,
     find_lua_function,
     inject_into_function,
     modify_function,
     send_file_to_game,
-    REGEX_PATTERN,
     FILE_PREFIX,
     FILE_POSTFIX,
     LINE_PREFIX,
@@ -234,7 +232,7 @@ end"""
 
     def test_find_local_function_by_line_number_not_supported(self):
         """Test that local functions cannot be found by line number either (limitation).
-        
+
         The implementation uses regex `r'\\s*function\\b'` which doesn't match
         `local function` because `local ` comes before `function`.
         """
@@ -257,7 +255,7 @@ end"""
         result = find_lua_function(content, func_name="hello")
         self.assertIsNotNone(result)
         start, end, _ = result
-        
+
         new_content = inject_into_function(content, start, end, "    -- injected")
         self.assertIn("-- injected", new_content)
         # The injected line should come before print
@@ -275,7 +273,7 @@ end"""
         result = find_lua_function(content, func_name="hello")
         self.assertIsNotNone(result)
         start, end, _ = result
-        
+
         # Inject after line 2 (after local x = 1)
         new_content = inject_into_function(content, start, end, "    -- injected", after_line=2)
         self.assertIn("-- injected", new_content)
@@ -303,8 +301,8 @@ end"""
 end"""
         }
         new_content = modify_function(
-            lua_files, 
-            func_name="hello", 
+            lua_files,
+            func_name="hello",
             target_file="file2.lua",
             inject_str="    -- modified"
         )
@@ -342,14 +340,14 @@ class TestFileFormat(unittest.TestCase):
 
 
 class TestLoadNonloadableFile(unittest.TestCase):
-    """Tests for the load_nonloadable_file function that parses WC3 nonloadable preload format files."""
+    """Tests for the parse_nonloadable_file function that parses WC3 nonloadable preload format files."""
 
-    def test_load_nonloadable_file_nonexistent(self):
-        """Test that load_nonloadable_file returns None for non-existent files."""
-        result = load_nonloadable_file("/nonexistent/path/to/file.txt")
+    def test_parse_nonloadable_file_nonexistent(self):
+        """Test that parse_nonloadable_file returns None for non-existent files."""
+        result = parse_nonloadable_file("/nonexistent/path/to/file.txt")
         self.assertIsNone(result)
 
-    def test_load_nonloadable_file_single_chunk(self):
+    def test_parse_nonloadable_file_single_chunk(self):
         """Test loading a nonloadable file with a single Preload chunk."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
             # Create content in the expected nonloadable preload format
@@ -363,12 +361,12 @@ endfunction'''
             f.write(content)
             temp_path = f.name
         try:
-            result = load_nonloadable_file(temp_path)
+            result = parse_nonloadable_file(temp_path)
             self.assertEqual(result, b'hello world')
         finally:
             os.unlink(temp_path)
 
-    def test_load_nonloadable_file_multiple_chunks(self):
+    def test_parse_nonloadable_file_multiple_chunks(self):
         """Test loading a nonloadable file with multiple Preload chunks."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
             content = '''function PreloadFiles takes nothing returns nothing
@@ -382,12 +380,12 @@ endfunction'''
             f.write(content)
             temp_path = f.name
         try:
-            result = load_nonloadable_file(temp_path)
+            result = parse_nonloadable_file(temp_path)
             self.assertEqual(result, b'hello world')
         finally:
             os.unlink(temp_path)
 
-    def test_load_nonloadable_file_with_newlines_in_payload(self):
+    def test_parse_nonloadable_file_with_newlines_in_payload(self):
         """Test loading a nonloadable file with newlines in the payload."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
             # Newlines within the payload should be preserved
@@ -402,28 +400,28 @@ endfunction'''
             f.write(content)
             temp_path = f.name
         try:
-            result = load_nonloadable_file(temp_path)
+            result = parse_nonloadable_file(temp_path)
             self.assertEqual(result, b'line1line2')
         finally:
             os.unlink(temp_path)
 
-    def test_load_nonloadable_file_fallback_raw_content(self):
-        """Test that load_nonloadable_file returns raw content if no preload wrapper found."""
+    def test_parse_nonloadable_file_fallback_raw_content(self):
+        """Test that parse_nonloadable_file returns raw content if no preload wrapper found."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
             # Content without preload wrapper
             content = "raw content without wrapper"
             f.write(content)
             temp_path = f.name
         try:
-            result = load_nonloadable_file(temp_path)
+            result = parse_nonloadable_file(temp_path)
             # Should return raw content as fallback
             self.assertEqual(result, content.encode())
         finally:
             os.unlink(temp_path)
 
-    def test_load_nonloadable_file_expected_format(self):
-        """Test that load_nonloadable_file correctly parses the expected WC3 nonloadable format.
-        
+    def test_parse_nonloadable_file_expected_format(self):
+        """Test that parse_nonloadable_file correctly parses the expected WC3 nonloadable format.
+
         The expected format is:
         function PreloadFiles takes nothing returns nothing
 
@@ -447,14 +445,14 @@ endfunction'''
             f.write(content)
             temp_path = f.name
         try:
-            result = load_nonloadable_file(temp_path)
+            result = parse_nonloadable_file(temp_path)
             self.assertEqual(result, b'0:|c00750508testMap_007|r0:Testing log')
         finally:
             os.unlink(temp_path)
 
-    def test_load_nonloadable_file_with_double_quotes_in_payload(self):
-        """Test that load_nonloadable_file correctly handles double quotes inside the payload.
-        
+    def test_parse_nonloadable_file_with_double_quotes_in_payload(self):
+        """Test that parse_nonloadable_file correctly handles double quotes inside the payload.
+
         In JASS/WC3, double quotes inside strings are represented as "" (doubled quotes).
         The regex pattern should match these and include them in the payload.
         """
@@ -470,7 +468,7 @@ endfunction'''
             f.write(content)
             temp_path = f.name
         try:
-            result = load_nonloadable_file(temp_path)
+            result = parse_nonloadable_file(temp_path)
             # The doubled quotes should be preserved in the payload
             self.assertEqual(result, b'He said ""hello"" to me')
         finally:
@@ -480,28 +478,28 @@ endfunction'''
 @contextmanager
 def mock_main_environment(commands, capture_print=False, track_calls=False):
     """Context manager to set up common mocks for testing main().
-    
+
     Args:
         commands: List of commands to simulate user input
         capture_print: If True, captures print output and yields it as a list
         track_calls: If True, tracks calls to remove_all_files and stop_all_watchers
-    
+
     Yields:
         dict with 'output' (if capture_print), 'remove_calls' and 'stop_calls' (if track_calls)
     """
     command_iter = iter(commands)
     result = {}
-    
+
     def fake_input(prompt):
         return next(command_iter)
-    
+
     patches = [
         patch.object(wc3_interpreter, 'input', side_effect=fake_input),
         patch.object(wc3_interpreter.signal, 'signal'),
         patch.object(wc3_interpreter, 'start_breakpoint_monitor'),
         patch.object(wc3_interpreter, 'stop_breakpoint_monitor'),
     ]
-    
+
     if capture_print:
         result['output'] = []
         def fake_print(*args, **kwargs):
@@ -509,7 +507,7 @@ def mock_main_environment(commands, capture_print=False, track_calls=False):
         patches.append(patch('builtins.print', side_effect=fake_print))
     else:
         patches.append(patch('builtins.print'))
-    
+
     if track_calls:
         result['remove_calls'] = []
         result['stop_calls'] = []
@@ -522,7 +520,7 @@ def mock_main_environment(commands, capture_print=False, track_calls=False):
     else:
         patches.append(patch.object(wc3_interpreter, 'remove_all_files'))
         patches.append(patch.object(wc3_interpreter, 'stop_all_watchers'))
-    
+
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
         yield result
 
@@ -539,7 +537,7 @@ class TestMainCommand(unittest.TestCase):
         """Test that main() handles the 'help' command."""
         with mock_main_environment(["help", "exit"], capture_print=True) as ctx:
             wc3_interpreter.main()
-        
+
         help_output = '\n'.join(ctx['output'])
         self.assertIn("Available commands", help_output)
         self.assertIn("file", help_output)
@@ -548,7 +546,7 @@ class TestMainCommand(unittest.TestCase):
         """Test that main() handles the 'restart' command."""
         with mock_main_environment(["restart", "exit"], track_calls=True) as ctx:
             wc3_interpreter.main()
-        
+
         # restart calls remove_all_files and stop_all_watchers, plus initial remove_all_files
         # and exit also calls them
         self.assertGreaterEqual(len(ctx['remove_calls']), 2)
@@ -558,7 +556,7 @@ class TestMainCommand(unittest.TestCase):
         """Test that main() handles the 'jump' command."""
         with mock_main_environment(["jump 5", "exit"]):
             wc3_interpreter.main()
-        
+
         # After jump 5, nextFile should be 5
         self.assertEqual(wc3_interpreter.nextFile, 5)
 
@@ -569,13 +567,13 @@ class TestFileCommand(unittest.TestCase):
     def test_send_file_to_game_nonexistent_file(self):
         """Test that send_file_to_game handles non-existent files gracefully."""
         output_lines = []
-        
+
         def fake_print(*args, **kwargs):
             output_lines.append(' '.join(str(a) for a in args))
-        
+
         with patch('builtins.print', side_effect=fake_print):
             send_file_to_game("/nonexistent/path/to/file.lua")
-        
+
         # Should print an error message
         error_output = '\n'.join(output_lines)
         self.assertIn("Error", error_output)
@@ -586,17 +584,17 @@ class TestFileCommand(unittest.TestCase):
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
             f.write("print('hello')")
             temp_path = f.name
-        
+
         try:
             sent_data = []
-            
+
             def mock_send_data_to_game(data, print_prompt_after=False):
                 sent_data.append(data)
-            
+
             with patch.object(wc3_interpreter, 'send_data_to_game', side_effect=mock_send_data_to_game), \
                  patch('builtins.print'):
                 send_file_to_game(temp_path)
-            
+
             # Check that the data was wrapped with OnInit wrapper
             self.assertEqual(len(sent_data), 1)
             self.assertIn(ONINIT_IMMEDIATE_WRAPPER, sent_data[0])
@@ -610,17 +608,17 @@ class TestFileCommand(unittest.TestCase):
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
             f.write("return 42")
             temp_path = f.name
-        
+
         try:
             commands = iter([f"file {temp_path}", "exit"])
             sent_files = []
-            
+
             def fake_input(prompt):
                 return next(commands)
-            
+
             def mock_send_file_to_game(filepath):
                 sent_files.append(filepath)
-            
+
             with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
                  patch.object(wc3_interpreter, 'remove_all_files'), \
                  patch.object(wc3_interpreter, 'stop_all_watchers'), \
@@ -630,7 +628,7 @@ class TestFileCommand(unittest.TestCase):
                  patch.object(wc3_interpreter, 'stop_breakpoint_monitor'), \
                  patch('builtins.print'):
                 wc3_interpreter.main()
-            
+
             # Check that send_file_to_game was called with the correct path
             self.assertEqual(len(sent_files), 1)
             self.assertEqual(sent_files[0], temp_path)

@@ -74,12 +74,15 @@ local isDisabled ---@type boolean
 
 EnabledBreakpoints = {} ---@type table<string | integer, boolean> -- saves for each breakpoint id if it is disabled. Allows the debugger to disable/enable bps
 
+-- Field separator for data files (ASCII 31 = unit separator)
+local FIELD_SEP = string.char(31)
+
 -- ============================================================================
 -- Shared Output File Format
 -- ============================================================================
 -- Both normal commands and breakpoints use a similar output format:
--- For normal commands: out.txt contains "{index}\n{result}"
--- For breakpoint results: bp_out.txt contains "{thread_id}:{cmd_index}\n{result}"
+-- For normal commands: out.txt contains "{index}SEPARATOR{result}"
+-- For breakpoint results: bp_out.txt contains "{thread_id}:{cmd_index}SEPARATOR{result}"
 
 --- Write a result to an output file with an index prefix
 --- This is the shared format used by both normal commands and breakpoints
@@ -87,7 +90,7 @@ EnabledBreakpoints = {} ---@type table<string | integer, boolean> -- saves for e
 ---@param index string|integer -- The command index (or thread_id:cmd_index for breakpoints)
 ---@param result string -- The result to write
 local function writeIndexedOutput(filename, index, result)
-    FileIO.Save(filename, tostring(index) .. "\n" .. result, false)
+    FileIO.Save(filename, tostring(index) .. FIELD_SEP .. result, false)
 end
 
 --- Helper to format output for responses
@@ -122,14 +125,9 @@ end
 -- - bp_threads.txt: Lists all thread IDs currently in a breakpoint (one per line)
 -- - bp_data_<thread_id>.txt: Contains breakpoint data as a single FIELD_SEP-separated record:
 --     bp_id<SEP>value<SEP>stack<SEP>stacktrace<SEP>var1<SEP>val1<SEP>var2<SEP>val2...
---     (stacktrace has \n escaped as \\n)
 -- - bp_in_<thread_id>_<idx>.txt: Per-thread input commands (incrementing files due to WC3 file caching)
 --     Content is just the raw command (no prefix needed since thread_id is in filename)
--- - bp_out.txt: Output results with format "thread_id:cmd_index\nresult"
-
--- Field separator for breakpoint data files (ASCII 31 = unit separator)
--- This character is unlikely to appear in variable names/values
-local FIELD_SEP = string.char(31)
+-- - bp_out.txt: Output results with format "thread_id:cmd_indexFIELD_SEPresult"
 
 local activeBreakpointThreads = {} ---@type table<string, boolean> -- Maps thread_id to true if in breakpoint
 local nextBreakpointCmdIndex = {} ---@type table<string, integer> -- Maps thread_id to next command index (persists across Breakpoint calls)
@@ -150,12 +148,7 @@ local function updateBreakpointThreadsFile()
     for threadId, _ in pairs(activeBreakpointThreads) do
         table.insert(threads, threadId)
     end
-    if #threads > 0 then
-        FileIO.Save(FILES_ROOT .. "\\bp_threads.txt", table.concat(threads, "\n"), false)
-    else
-        -- Write empty marker when no threads are in breakpoint
-        FileIO.Save(FILES_ROOT .. "\\bp_threads.txt", "", false)
-    end
+    FileIO.Save(FILES_ROOT .. "\\bp_threads.txt", table.concat(threads, FIELD_SEP), false)
 end
 
 --- Write breakpoint data file for a specific thread
@@ -177,9 +170,7 @@ local function writeBreakpointDataFile(threadId, breakpointId, localVariables, e
         stack = Debug.traceback() or ""
     end
     table.insert(fields, "stack")
-    -- Note: gsub returns two values, we only want the first (the modified string)
-    local escapedStack = stack:gsub("\n", "\\n")
-    table.insert(fields, escapedStack)
+    table.insert(fields, stack)
 
     -- Add local variable values in order (read from env if provided, otherwise from original pairs)
     if localVariables then
@@ -201,6 +192,27 @@ local function removeBreakpointDataFile(threadId)
     FileIO.Save(FILES_ROOT .. "\\bp_data_" .. threadId .. ".txt", "", false)
 end
 
+-- Helper function to return all local variable values from the environment
+---@param env table -- Environment table
+---@param vars {[1]: string, [2]: any}[]? -- Array of {name, value} pairs
+---@return any ...
+local function returnLocalValues(env, vars)
+    if not vars or #vars == 0 then return end
+    local values = {}
+    for _, pair in ipairs(vars) do
+        local name = pair[1]
+        table.insert(values, env[name])
+    end
+    return table.unpack(values)
+end
+
+---@param threadId string
+---@param cmdIndex string|integer
+---@param data string
+local function writeBPOutput(threadId, cmdIndex, data)
+    writeIndexedOutput(FILES_ROOT .. "\\bp_out.txt", threadId .. ":" .. cmdIndex, data)
+end
+
 --- Put a breakpoint in your code that will halt execution of a function and wait for external debugger instructions.
 --- Returns the (potentially modified) local variable values in the same order as the input array.
 --- Usage: `var1, var2 = Breakpoint(id, {{"var1", var1}, {"var2", var2}})`
@@ -213,32 +225,18 @@ end
 --- 2. Execution of the thread will not continue unless you connect the debugger, be sure not to keep breakpoints in your final code.
 --- 3. To avoid desyncs, this function will do nothing in multiplayer
 function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
-    -- Helper function to return all local variable values from the environment
-    local function returnLocalValues(env, vars)
-        if not vars or #vars == 0 then return end
-        local values = {}
-        for _, pair in ipairs(vars) do
-            local name = pair[1]
-            table.insert(values, env[name])
-        end
-        return table.unpack(values)
-    end
-
-    if isDisabled then return returnLocalValues(createBreakpointEnv(localVariables), localVariables) end
+    -- Create environment with locals and globals accessible
+    local env = createBreakpointEnv(localVariables)
+    if isDisabled then return returnLocalValues(env, localVariables) end
 
     if not coroutine.isyieldable() then
-        if Debug then
-            Debug.throwError("Coroutine is not yieldable.")
-        end
-        return returnLocalValues(createBreakpointEnv(localVariables), localVariables)
+        if Debug then Debug.throwError("Coroutine is not yieldable.") end
+        return returnLocalValues(env, localVariables)
     end
     if EnabledBreakpoints[breakpointId] == nil then
         EnabledBreakpoints[breakpointId] = (startsEnabled == nil) or startsEnabled
     end
-    if EnabledBreakpoints[breakpointId] == false then return returnLocalValues(createBreakpointEnv(localVariables), localVariables) end
-
-    -- Create environment with locals and globals accessible
-    local env = createBreakpointEnv(localVariables)
+    if EnabledBreakpoints[breakpointId] == false then return returnLocalValues(env, localVariables) end
 
     if condition then
         local cond = load(condition, "breakpoint_condition", "t", env)
@@ -269,10 +267,9 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
             -- Command found - file content is just the raw command
             if command == "continue" then
                 -- Acknowledge the continue command for the debugger protocol
-                writeIndexedOutput(FILES_ROOT .. "\\bp_out.txt", threadId .. ":" .. cmdIndex, "")
+                writeBPOutput(threadId, cmdIndex, "")
                 -- Advance and persist the index so next Breakpoint() for this thread starts fresh
-                cmdIndex = cmdIndex + 1
-                nextBreakpointCmdIndex[threadId] = cmdIndex
+                nextBreakpointCmdIndex[threadId] = cmdIndex + 1
                 -- Clean up and exit breakpoint
                 activeBreakpointThreads[threadId] = nil
                 removeBreakpointDataFile(threadId)
@@ -296,14 +293,13 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
             end
 
             -- Write result using shared format (thread_id:cmd_index as index)
-            writeIndexedOutput(FILES_ROOT .. "\\bp_out.txt", threadId .. ":" .. cmdIndex, outData)
+            writeBPOutput(threadId, cmdIndex, outData)
 
             -- Update breakpoint data file (in case locals changed)
             writeBreakpointDataFile(threadId, breakpointId, localVariables, env)
 
             -- Advance and persist the index
             cmdIndex = cmdIndex + 1
-            nextBreakpointCmdIndex[threadId] = cmdIndex
         end
         TriggerSleepAction(0.1)
     end
@@ -312,7 +308,7 @@ end
 -- ============================================================================
 -- Normal Command System
 -- ============================================================================
--- Uses single out.txt file with format: "{index}\n{result}"
+-- Uses single out.txt file with format: "{index}SEPARATOR{result}"
 
 local nextFile = 0
 local curPeriod = PERIOD
@@ -333,7 +329,8 @@ function CheckFiles()
         local cur_func = load(commands)
         local result = nil
         if cur_func ~= nil then
-            result = cur_func()
+            local ok = false
+            ok, result = pcall(cur_func)
         end
         -- Use shared output format: index on first line, result on subsequent lines
         writeIndexedOutput(FILES_ROOT .. "\\out.txt", nextFile, tostring(result))
