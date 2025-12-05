@@ -15,8 +15,10 @@ Note that currently the interpreter does not support multiplayer (It will not ru
 Installation and usage instructions:
  - Copy the lua code to your map and install the requirements.
  - Install python3 (tested with python 3.9 but would probably work with any python3 version)
+ - pip install watchdog
  - Create wc3_interpreter.py script, and edit `CUSTOM_MAP_DATA_PATH` to point to your `CustomMapData` folder
- - In windows terminal run `python ...\wc3_interpreter.py` (type help for list of commands and usage)
+ - In windows terminal run `python <full path>\wc3_interpreter.py` (type help for list of commands and usage)
+
  - Tip - if you want to debug a replay, run warcraft with nowfpause, and then you can alt tab to the shell without the game pausing:
     "C:\Program Files (x86)\Warcraft III\_retail_\x86_64\Warcraft III.exe" -launch -nowfpause
 
@@ -234,10 +236,10 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
         EnabledBreakpoints[breakpointId] = (startsEnabled == nil) or startsEnabled
     end
     if EnabledBreakpoints[breakpointId] == false then return returnLocalValues(createBreakpointEnv(localVariables), localVariables) end
-    
+
     -- Create environment with locals and globals accessible
     local env = createBreakpointEnv(localVariables)
-    
+
     if condition then
         local cond = load(condition, "breakpoint_condition", "t", env)
         if cond == nil then

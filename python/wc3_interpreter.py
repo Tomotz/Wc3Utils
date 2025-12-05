@@ -33,7 +33,7 @@ def _get_username() -> str:
 CUSTOM_MAP_DATA_PATH = r"D:\Users\{username}\Documents\Warcraft III\CustomMapData\\".format(username=_get_username())
 
 #check if we're running in wsl
-if os.path.exists("/mnt/d/Users/"):
+if os.path.exists("/mnt/d/Users/Tom"):
     CUSTOM_MAP_DATA_PATH = "/mnt/d/Users/Tom/Documents/Warcraft III/CustomMapData/"
 
 # Allow overriding FILES_ROOT via environment variable for testing
@@ -479,10 +479,10 @@ def get_breakpoint_info(thread_id: str) -> Optional[Dict[str, any]]:
 
 def _is_new_breakpoint(thread_id_bytes: bytes, info: Dict) -> bool:
     """Check if this is a new breakpoint by comparing bp_id with last seen value.
-    
+
     This fixes the bug where a second breakpoint from the same thread was not detected
     because the old logic only checked if the thread_id was new in the set.
-    
+
     Returns True if this is a new breakpoint (bp_id changed or first time seeing this thread).
     Updates last_seen_bp_id as a side effect.
     """
@@ -610,7 +610,7 @@ def breakpoint_monitor_thread() -> None:
 
     This thread handles breakpoint state management and prints BREAKPOINT HIT messages
     immediately when breakpoints are detected, without waiting for user input.
-    
+
     Uses _is_new_breakpoint to detect new breakpoints by comparing bp_id, which fixes
     the bug where a second breakpoint from the same thread was not detected.
     """
@@ -623,7 +623,7 @@ def breakpoint_monitor_thread() -> None:
             info = get_breakpoint_info(thread_id)
             if not info:
                 continue
-            
+
             # Use _is_new_breakpoint to detect new breakpoints by bp_id change
             if not _is_new_breakpoint(thread_id_bytes, info):
                 continue
