@@ -435,23 +435,38 @@ function testFileIO()
     LogWriteNoFlush("FileIO savefile/loadfile end")
 end
 
+--- Suggested test run:
+--- 1. See that basic_test bp is hit
+--- print(gold) -- should  be 1000
+--- return level -- should be 5
+--- gold = 150
+--- return gold -- should be 150
+--- continue
+--- 2. See that conditional_test1 bp is skipped
+--- 3. See that conditional_test2 bp is hit
+--- return gold -- should be 150
+--- continue
+--- 4. See that disabled_test bp is skipped
+--- 5. See that dynamic_test bp is hit
 -- Test function to trigger different breakpoint scenarios
 --- Need to wrap with ExecuteFunc or trigger
 function TestBreakpoints()
     -- Test 1: Basic breakpoint with local variables
-    local playerGold = 1000
-    local playerLevel = 5
-    Breakpoint("basic_test", {gold = playerGold, level = playerLevel})
+    local gold = 1000
+    local level = 5
+    gold, level = Breakpoint("basic_test", {{"gold", gold}, {"level", level}})
 
     -- Test 2: Conditional breakpoint (only triggers if gold > 500)
-    playerGold = 600
-    Breakpoint("conditional_test", {gold = playerGold}, "return gold > 500")
+    gold = Breakpoint("conditional_test1", {{"gold", gold}}, "return gold > 500")
+
+    -- Test 3: Conditional breakpoint (only triggers if gold <= 500)
+    gold = Breakpoint("conditional_test2", {{"gold", gold}}, "return gold <= 500")
 
     -- Test 3: Disabled breakpoint (won't trigger)
     Breakpoint("disabled_test", nil, nil, false)
 
     -- Test 4: Breakpoint that can be enabled/disabled dynamically
-    Breakpoint("dynamic_test", {status = "testing"})
+    Breakpoint("dynamic_test", {{"status", "testing"}})
 end
 
 OnInit.final(function()

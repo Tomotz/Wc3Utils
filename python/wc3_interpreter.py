@@ -373,12 +373,12 @@ def load_nonloadable_file(filename: str) -> Optional[bytes]:
 
     In WC3, these files go through the Preload mechanism and are wrapped in a standard format:
         function PreloadFiles takes nothing returns nothing
-        
+
             call PreloadStart()
             call Preload( "payload_chunk1" )
             call Preload( "payload_chunk2" )
             call PreloadEnd( 0.0 )
-        
+
         endfunction
 
     This function parses the preload wrapper and extracts the concatenated payload from all
@@ -391,7 +391,7 @@ def load_nonloadable_file(filename: str) -> Optional[bytes]:
         return None
     with open(filename, 'rb') as file:
         content = file.read()
-    
+
     # Parse the preload wrapper and extract payload from call Preload( "..." ) lines
     # Pattern matches: call Preload( "..." ) and allows double quotes inside the payload
     # The pattern ((?:""|[^"])*) matches either doubled quotes "" or non-quote chars,
@@ -400,12 +400,12 @@ def load_nonloadable_file(filename: str) -> Optional[bytes]:
     matches = re.findall(pattern, content)
     if matches:
         return b''.join(matches)
-    
+
     # Check if this looks like a preload wrapper (has PreloadStart/PreloadEnd but no Preload calls)
     # This happens when FileIO.Save is called with empty data
     if b'call PreloadStart()' in content and b'call PreloadEnd(' in content:
         return None
-    
+
     # Fallback: return raw content if no preload wrapper found (for backwards compatibility)
     return content
 
@@ -574,7 +574,7 @@ def send_breakpoint_command(thread_id: str, command: str) -> Optional[str]:
 
 def breakpoint_monitor_thread() -> None:
     """Background thread that monitors for new breakpoint threads.
-    
+
     This thread handles breakpoint state management and prints BREAKPOINT HIT messages
     immediately when breakpoints are detected, without waiting for user input.
     """
@@ -589,18 +589,18 @@ def breakpoint_monitor_thread() -> None:
             info = get_breakpoint_info(thread_id)
             if not info:
                 continue
-            
+
             with bp_state_lock:
                 # Update state
                 if current_breakpoint is None:
                     current_breakpoint = (thread_id, info)
                 else:
                     pending_breakpoints.append((thread_id, info))
-                
+
                 # Always print the BREAKPOINT HIT message immediately
                 # Use the same format for both current and queued breakpoints
                 print_breakpoint_hit(thread_id, info)
-                
+
                 # If this is a queued breakpoint, add a note about context
                 if current_breakpoint[0] != thread_id:
                     print(f"[Note: this breakpoint is queued; current context stays at {current_breakpoint[0][:8]}... until you 'continue']", flush=True)
@@ -630,34 +630,35 @@ def stop_breakpoint_monitor() -> None:
 
 def print_breakpoint_hit(thread_id: str, info: Dict[str, any]) -> None:
     """Print a message when a breakpoint is hit.
-    
+
     Uses flush=True to ensure immediate output when called from background thread.
     """
     bp_id = info.get('bp_id', 'unknown')
     locals_list = info.get('locals', [])
 
-    print("\n" + "=" * 60, flush=True)
-    print(f"BREAKPOINT HIT: {bp_id}", flush=True)
-    print(f"Thread: {thread_id}", flush=True)
+    print("\n" + "=" * 60)
+    print(f"BREAKPOINT HIT: {bp_id}")
+    print(f"Thread: {thread_id}")
     if locals_list:
-        print(f"Local variables: {b', '.join(locals_list)}", flush=True)
-    print("Type 'help' for commands, 'continue' to resume, or enter Lua code", flush=True)
-    print("=" * 60, flush=True)
+        print(f"Local variables: {b', '.join(locals_list)}")
+    print("Type 'help' for commands, 'continue' to resume, or enter Lua code")
+    print("=" * 60)
+    print(f"{nextFile} >>> ", flush=True, end='')
 
 
 def handle_breakpoint_command(cmd: str) -> bool:
     """Handle a command in breakpoint context.
-    
+
     Returns True if we should continue in breakpoint mode, False if exiting to normal mode.
     """
     global current_breakpoint, pending_breakpoints
-    
+
     with bp_state_lock:
         if current_breakpoint is None:
             return False
-        
+
         thread_id, info = current_breakpoint
-    
+
     if cmd == "help":
         print("Breakpoint mode commands:")
         print("  list      - List all threads in breakpoint (current marked with *)")
@@ -710,7 +711,7 @@ def handle_breakpoint_command(cmd: str) -> bool:
     if cmd == "continue":
         response = send_breakpoint_command(thread_id, "continue")
         print(f"Resuming thread {thread_id}...")
-        
+
         # Move to next pending breakpoint if any
         with bp_state_lock:
             if pending_breakpoints:
