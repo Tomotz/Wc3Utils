@@ -29,6 +29,8 @@ from wc3_interpreter import (
     get_breakpoint_info,
     send_breakpoint_command,
     bp_command_indices,
+    wait_for_new_breakpoint,
+    last_seen_bp_id,
 )
 
 
@@ -63,6 +65,8 @@ class EndToEndBreakpointTest(unittest.TestCase):
         set_files_root(self.interpreter_dir)
         # Reset command indices for each test
         bp_command_indices.clear()
+        # Reset last seen bp_id state for each test to ensure clean detection
+        last_seen_bp_id.clear()
         self.lua_process = None
         self.lua_output = []
         self.lua_thread = None
@@ -110,17 +114,20 @@ class EndToEndBreakpointTest(unittest.TestCase):
         return self.lua_process
 
     def _wait_for_breakpoint(self, timeout: float = 30.0) -> str:
-        """Wait for a breakpoint to be hit and return the thread ID.
+        """Wait for a new breakpoint to be hit and return the thread ID.
+        
+        Uses wait_for_new_breakpoint from wc3_interpreter.py to ensure the test
+        uses the same breakpoint detection logic as the production code. This
+        detects breakpoints by checking if the bp_id for a thread has changed,
+        not just if the thread is present - fixing the bug where a second
+        breakpoint from the same thread was not detected.
         
         Uses a large timeout for reliability - actual response should be much faster.
         """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            threads = get_breakpoint_threads()
-            if threads:
-                return threads[0].decode('utf-8', errors='replace')
-            time.sleep(0.1)
-        self.fail(f"No breakpoint hit within {timeout} seconds")
+        thread_id = wait_for_new_breakpoint(timeout)
+        if thread_id is None:
+            self.fail(f"No breakpoint hit within {timeout} seconds")
+        return thread_id
 
     def _wait_for_no_breakpoint(self, timeout: float = 5.0) -> bool:
         """Wait for all breakpoints to be cleared."""

@@ -122,6 +122,11 @@ bp_state_lock: threading.Lock = threading.Lock()  # Lock for breakpoint state
 current_breakpoint: Optional[Tuple[str, Dict]] = None  # (thread_id, info) of current breakpoint being handled
 pending_breakpoints: List[Tuple[str, Dict]] = []  # Queue of breakpoints waiting to be handled
 
+# Track last seen bp_id per thread to detect new breakpoints on the same thread
+# This fixes the bug where a second breakpoint from the same thread was not detected
+# because the old logic only checked if the thread_id was new, not if the bp_id changed
+last_seen_bp_id: Dict[bytes, bytes] = {}  # Maps thread_id (bytes) to last seen bp_id (bytes)
+
 # Field separator for breakpoint data files (ASCII 31 = unit separator)
 FIELD_SEP = bytes([31])
 
@@ -472,6 +477,62 @@ def get_breakpoint_info(thread_id: str) -> Optional[Dict[str, any]]:
     return info
 
 
+def _is_new_breakpoint(thread_id_bytes: bytes, info: Dict) -> bool:
+    """Check if this is a new breakpoint by comparing bp_id with last seen value.
+    
+    This fixes the bug where a second breakpoint from the same thread was not detected
+    because the old logic only checked if the thread_id was new in the set.
+    
+    Returns True if this is a new breakpoint (bp_id changed or first time seeing this thread).
+    Updates last_seen_bp_id as a side effect.
+    """
+    global last_seen_bp_id
+    bp_id = info.get('bp_id')
+    if bp_id is None:
+        return False
+    prev = last_seen_bp_id.get(thread_id_bytes)
+    if prev == bp_id:
+        return False
+    last_seen_bp_id[thread_id_bytes] = bp_id
+    return True
+
+
+def _cleanup_breakpoint_state(current_threads: set) -> None:
+    """Remove stale entries from last_seen_bp_id for threads no longer in breakpoint."""
+    global last_seen_bp_id
+    for tid in list(last_seen_bp_id.keys()):
+        if tid not in current_threads:
+            del last_seen_bp_id[tid]
+
+
+def wait_for_new_breakpoint(timeout: float = 30.0) -> Optional[str]:
+    """Wait for a new breakpoint to be hit and return the thread ID.
+    
+    This function uses the same bp_id tracking logic as the breakpoint monitor thread,
+    ensuring consistent detection of new breakpoints. It detects breakpoints by checking
+    if the bp_id for a thread has changed, not just if the thread is present.
+    
+    Uses a large timeout for reliability - actual response should be much faster.
+    
+    Returns the thread_id (str) if a new breakpoint is detected, None on timeout.
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        threads = get_breakpoint_threads()
+        current_threads = set(threads)
+        for tid_bytes in current_threads:
+            thread_id = tid_bytes.decode('utf-8', errors='replace')
+            info = get_breakpoint_info(thread_id)
+            if not info:
+                continue
+            if _is_new_breakpoint(tid_bytes, info):
+                _cleanup_breakpoint_state(current_threads)
+                return thread_id
+        _cleanup_breakpoint_state(current_threads)
+        time.sleep(0.1)
+    return None
+
+
 def bp_list_threads() -> None:
     """List all threads currently in a breakpoint."""
     threads = get_breakpoint_threads()
@@ -577,17 +638,22 @@ def breakpoint_monitor_thread() -> None:
 
     This thread handles breakpoint state management and prints BREAKPOINT HIT messages
     immediately when breakpoints are detected, without waiting for user input.
+    
+    Uses _is_new_breakpoint to detect new breakpoints by comparing bp_id, which fixes
+    the bug where a second breakpoint from the same thread was not detected.
     """
     global current_breakpoint, pending_breakpoints
-    known_threads: set[bytes] = set()
     while not bp_monitor_stop_event.is_set():
         current_threads: set[bytes] = set(get_breakpoint_threads())
-        new_threads = current_threads - known_threads
 
-        for thread_id_bytes in new_threads:
+        for thread_id_bytes in current_threads:
             thread_id = thread_id_bytes.decode('utf-8', errors='replace')
             info = get_breakpoint_info(thread_id)
             if not info:
+                continue
+            
+            # Use _is_new_breakpoint to detect new breakpoints by bp_id change
+            if not _is_new_breakpoint(thread_id_bytes, info):
                 continue
 
             with bp_state_lock:
@@ -605,7 +671,7 @@ def breakpoint_monitor_thread() -> None:
                 if current_breakpoint[0] != thread_id:
                     print(f"[Note: this breakpoint is queued; current context stays at {current_breakpoint[0][:8]}... until you 'continue']", flush=True)
 
-        known_threads = current_threads
+        _cleanup_breakpoint_state(current_threads)
         time.sleep(0.2)  # Check every 200ms
 
 
