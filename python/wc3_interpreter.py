@@ -618,91 +618,62 @@ def send_data_to_game(data: str, print_prompt_after: bool = False) -> Optional[s
                 bp_command_indices[thread_id] = 0
 
             cmd_index = bp_command_indices[thread_id]
-            bp_command_indices[thread_id] = cmd_index + 1
+            bp_command_indices[thread_id] += 1
 
             # Write command to bp_in_<thread_id>_<cmd_index>.txt
             filename = os.path.join(FILES_ROOT, f"bp_in_{thread_id}_{cmd_index}.txt")
-            create_file(filename, data)
 
-            # Wait for response in bp_out.txt
             expected_prefix = f"{thread_id}:{cmd_index}"
             out_file = os.path.join(FILES_ROOT, "bp_out.txt")
-            start_time = time.time()
-            timeout = 60.0
-            debug = os.environ.get('WC3_E2E_DEBUG')
-
-            if debug:
-                print(f"[DEBUG] send_data_to_game (breakpoint): thread_id={thread_id}, cmd_index={cmd_index}")
-                print(f"[DEBUG] Wrote command to: {filename}")
-                print(f"[DEBUG] Waiting for response with prefix: {expected_prefix}")
-
-            while time.time() - start_time < timeout:
-                if os.path.exists(out_file):
-                    content = parse_nonloadable_file(out_file)
-                    if content:
-                        index, result = parse_indexed_output(content)
-                        if debug:
-                            print(f"[DEBUG] {out_file} content (first 100 bytes): {content[:100]}")
-                            print(f"[DEBUG] Parsed index: {index}, expected: {expected_prefix}")
-                        if index and index.decode('utf-8', errors='replace') == expected_prefix:
-                            if debug:
-                                print(f"[DEBUG] Got matching response!")
-                            result_str = result.decode('utf-8', errors='replace') if result else None
-                            if result_str and result_str != "nil":
-                                print(result_str)
-                            if print_prompt_after:
-                                print(get_prompt(), end="", flush=True)
-                            return result_str
-                time.sleep(0.1)
-
-            if debug:
-                print(f"[DEBUG] TIMEOUT waiting for {expected_prefix}")
-                print(f"[DEBUG] bp_out.txt exists: {os.path.exists(out_file)}")
-                if os.path.exists(out_file):
-                    content = parse_nonloadable_file(out_file)
-                    print(f"[DEBUG] Final bp_out.txt content: {content}")
-
-            bp_command_indices[thread_id] = cmd_index + 1
-            print(f"Timeout waiting for breakpoint response")
-            if print_prompt_after:
-                print(get_prompt(), end="", flush=True)
-            return None
         else:
             # Normal mode: use in/out files
-            filename = os.path.join(FILES_ROOT, f"in{nextFile}.txt")
-            create_file(filename, data)
-
-            # Wait for response in out.txt with matching index
-            out_file = os.path.join(FILES_ROOT, "out.txt")
-            start_time = time.time()
-            timeout = 60.0  # 60 second timeout
-
-            while time.time() - start_time < timeout:
-                if os.path.exists(out_file):
-                    try:
-                        content = parse_nonloadable_file(out_file)
-                        if content:
-                            index, result = parse_indexed_output(content)
-                            if index == str(nextFile).encode('utf-8'):
-                                result_str = result.decode('utf-8', errors='replace') if result else None
-                                if result_str and result_str != "nil":
-                                    print(result_str)
-                                nextFile += 1
-                                if print_prompt_after:
-                                    print(get_prompt(), end="", flush=True)
-                                return result_str
-                    except Exception as e:
-                        print("failed. Got exception: ", e)
-                        traceback.print_exc()
-                        nextFile += 1
-                        return None
-                time.sleep(0.1)
-
+            cmd_index = nextFile
             nextFile += 1
-            print(f"Timeout waiting for response to command {nextFile}")
-            if print_prompt_after:
-                print(get_prompt(), end="", flush=True)
-            return None
+            filename = os.path.join(FILES_ROOT, f"in{cmd_index}.txt")
+            thread_id = ""
+            expected_prefix = f"{cmd_index}"
+            out_file = os.path.join(FILES_ROOT, "out.txt")
+
+        create_file(filename, data)
+        start_time = time.time()
+        timeout = 20
+        debug = os.environ.get('WC3_E2E_DEBUG')
+
+        if debug:
+            print(f"[DEBUG] send_data_to_game thread_id={thread_id}, cmd_index={cmd_index}")
+            print(f"[DEBUG] Wrote command to: {filename}")
+            print(f"[DEBUG] Waiting for response with prefix: {expected_prefix}")
+
+        while time.time() - start_time < timeout:
+            if os.path.exists(out_file):
+                content = parse_nonloadable_file(out_file)
+                if content:
+                    index, result = parse_indexed_output(content)
+                    if debug:
+                        print(f"[DEBUG] {out_file} content (first 100 bytes): {content[:100]}")
+                        print(f"[DEBUG] Parsed index: {index}, expected: {expected_prefix}")
+                    if index and index.decode('utf-8', errors='replace') == expected_prefix:
+                        if debug:
+                            print(f"[DEBUG] Got matching response!")
+                        result_str = result.decode('utf-8', errors='replace') if result else None
+                        if result_str and result_str != "nil":
+                            print(result_str)
+                        if print_prompt_after:
+                            print(get_prompt(), end="", flush=True)
+                        return result_str
+            time.sleep(0.1)
+
+        if debug:
+            print(f"[DEBUG] TIMEOUT waiting for {expected_prefix}")
+            print(f"[DEBUG] bp_out.txt exists: {os.path.exists(out_file)}")
+            if os.path.exists(out_file):
+                content = parse_nonloadable_file(out_file)
+                print(f"[DEBUG] Final bp_out.txt content: {content}")
+
+        print(f"Timeout waiting for response")
+        if print_prompt_after:
+            print(get_prompt(), end="", flush=True)
+        return None
 
 def wrap_with_oninit_immediate(content: str) -> str:
     """Wraps Lua content with OnInit immediate execution wrapper"""
