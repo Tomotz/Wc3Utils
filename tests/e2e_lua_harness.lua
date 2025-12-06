@@ -487,6 +487,85 @@ local function test_breakpoint_four_sequential()
     print("Test completed successfully! finalCounter=" .. tostring(finalCounter) .. ", finalMessage=" .. tostring(finalMessage))
 end
 
+-- Test: Dynamic breakpoint on a global function
+-- This test simulates what the Python "b/break" command does: it wraps a global function
+-- with a breakpoint wrapper. When the function is called, the breakpoint should trigger,
+-- allowing inspection and modification of arguments.
+local function test_dynamic_breakpoint()
+    print("Starting dynamic_breakpoint test...")
+
+    -- Define a global function that we'll set a breakpoint on
+    function MyGlobalFunction(x, y)
+        print("MyGlobalFunction called with x=" .. tostring(x) .. ", y=" .. tostring(y))
+        return x + y
+    end
+
+    -- Apply the dynamic breakpoint wrapper (same code that Python's "b" command generates)
+    -- This wraps the function to call Breakpoint() before the original function
+    do
+        local _orig_func = _G["MyGlobalFunction"]
+        if _orig_func == nil then
+            error("Function 'MyGlobalFunction' not found in _G")
+        end
+        _G["MyGlobalFunction"] = function(...)
+            local args = {...}
+            local localVars = {}
+            for i, v in ipairs(args) do
+                table.insert(localVars, {"arg" .. i, v})
+            end
+            local modified = {Breakpoint("bp:MyGlobalFunction", localVars)}
+            return _orig_func(table.unpack(modified))
+        end
+    end
+    print("Dynamic breakpoint wrapper applied to MyGlobalFunction")
+
+    local testComplete = false
+    local functionResult = nil
+    local co = coroutine.create(function()
+        print("Calling MyGlobalFunction(10, 20) - should trigger breakpoint...")
+
+        -- Call the function - this should trigger the breakpoint
+        functionResult = MyGlobalFunction(10, 20)
+
+        print("MyGlobalFunction returned: " .. tostring(functionResult))
+        testComplete = true
+    end)
+
+    -- Start the coroutine
+    print("Starting coroutine...")
+    local success, err = coroutine.resume(co)
+    if not success then
+        error("Coroutine failed to start: " .. tostring(err))
+    end
+
+    -- Poll and process timers/coroutines until test completes or timeout
+    local maxIterations = 600  -- 60 seconds at 0.1s per iteration
+    local iteration = 0
+    while not testComplete and iteration < maxIterations do
+        TriggerSleepAction(0.1)
+        processTimersAndCoroutines()
+
+        if coroutine.status(co) == "dead" and not testComplete then
+            break
+        end
+
+        os.execute("sleep 0.1")
+        iteration = iteration + 1
+    end
+
+    if not testComplete then
+        error("Test did not complete - breakpoint was not continued (iterations: " .. iteration .. ")")
+    end
+
+    -- Verify the function returned the correct result
+    -- The Python test modifies arg1 from 10 to 100, so result should be 100+20=120
+    if functionResult ~= 120 then
+        error("Expected MyGlobalFunction to return 120 (after arg1 modified to 100), got: " .. tostring(functionResult))
+    end
+
+    print("Test completed successfully! Function returned correct result with modified argument.")
+end
+
 -- ============================================================================
 -- Main Entry Point
 -- ============================================================================
@@ -521,6 +600,8 @@ elseif testName == "breakpoint_four_sequential" then
     runTest("breakpoint_four_sequential", test_breakpoint_four_sequential)
 elseif testName == "breakpoint_enable_disable" then
     runTest("breakpoint_enable_disable", test_breakpoint_enable_disable)
+elseif testName == "dynamic_breakpoint" then
+    runTest("dynamic_breakpoint", test_dynamic_breakpoint)
 else
     print("Unknown test: " .. testName)
     os.exit(1)
