@@ -9,7 +9,7 @@ import signal
 import sys
 import threading
 from queue import Queue, Empty
-from typing import Optional, Callable, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple
 
 # Optional watchdog import for file watching functionality
 try:
@@ -17,10 +17,6 @@ try:
     from watchdog.events import FileSystemEventHandler
     WATCHDOG_AVAILABLE = True
 except ImportError:
-    Observer = None
-    class FileSystemEventHandler:
-        """Fallback base class when watchdog is not installed."""
-        pass
     WATCHDOG_AVAILABLE = False
 
 # You might need to change `D:` to your Warcraft III installation drive
@@ -32,7 +28,7 @@ def _get_username() -> str:
 
 CUSTOM_MAP_DATA_PATH = r"D:\Users\{username}\Documents\Warcraft III\CustomMapData\\".format(username=_get_username())
 
-#check if we're running in wsl
+# Check if we're running in wsl. If you're working in linux/wsl env, you need to manually change the next 2 lines
 if os.path.exists("/mnt/d/Users/Tom"):
     CUSTOM_MAP_DATA_PATH = "/mnt/d/Users/Tom/Documents/Warcraft III/CustomMapData/"
 
@@ -119,7 +115,7 @@ thread_state_is_bp: Dict[str, bool] = {}  # Maps thread_id to whether it's curre
 
 # Queues for inter-thread communication (thread-safe by design)
 # Other threads push to these, main thread reads from them
-stdin_queue: Queue = Queue()  # User input from stdin reader thread
+stdin_queue: Queue[str] = Queue()  # User input from stdin reader thread
 file_change_queue: Queue = Queue()  # File change events from watchdog
 
 # Stdin reader thread
@@ -129,26 +125,27 @@ stdin_reader_stop_event: threading.Event = threading.Event()
 # Field separator for breakpoint data files (ASCII 31 = unit separator)
 FIELD_SEP = bytes([31])
 
-class FileChangeHandler(FileSystemEventHandler):
-    """Handler for file change events that pushes to a queue for main thread processing"""
-    def __init__(self, filepath: str, queue: Queue):
-        super().__init__()
-        self.filepath = os.path.abspath(filepath)
-        self.queue = queue
-        self.last_modified = 0
+if WATCHDOG_AVAILABLE:
+    class FileChangeHandler(FileSystemEventHandler):
+        """Handler for file change events that pushes to a queue for main thread processing"""
+        def __init__(self, filepath: str, queue: Queue):
+            super().__init__()
+            self.filepath = os.path.abspath(filepath)
+            self.queue = queue
+            self.last_modified = 0
 
-    def on_modified(self, event) -> None:
-        if event.is_directory:
-            return
-        # Check if this is the file we're watching
-        if os.path.abspath(event.src_path) == self.filepath:
-            # Debounce: ignore events within 0.5 seconds of each other
-            current_time = time.time()
-            if current_time - self.last_modified < 0.5:
+        def on_modified(self, event) -> None:
+            if event.is_directory:
                 return
-            self.last_modified = current_time
-            # Push to queue - main thread will handle the actual work
-            self.queue.put(self.filepath)
+            # Check if this is the file we're watching
+            if os.path.abspath(event.src_path) == self.filepath:
+                # Debounce: ignore events within 0.5 seconds of each other
+                current_time = time.time()
+                if current_time - self.last_modified < 0.5:
+                    return
+                self.last_modified = current_time
+                # Push to queue - main thread will handle the actual work
+                self.queue.put(self.filepath)
 
 class FileWatcher:
     """File watcher that pushes change events to a queue for main thread processing.
@@ -509,12 +506,6 @@ def check_for_new_breakpoints() -> None:
 
     This function is called from the main event loop to poll for new breakpoints.
     Since it runs on the main thread, no locks are needed.
-
-    Deduplication strategy:
-    - Use thread_state_is_bp to check if we've already processed this breakpoint
-    - When the main thread continues from a breakpoint, it clears
-      thread_state_is_bp[thread_id], allowing the next breakpoint from the same
-      thread to be detected (even with the same bp_id)
     """
     for thread_id_bytes in parse_bp_threads_file():
         thread_id = thread_id_bytes.decode('utf-8', errors='replace')
@@ -540,11 +531,10 @@ def stdin_reader_thread_func() -> None:
             line = input()
             stdin_queue.put(line)
         except EOFError:
-            stdin_queue.put(None)
             break
-        except Exception:
+        except Exception as e:
             # If stdin is closed or there's an error, exit the thread
-            stdin_queue.put(None)
+            print("Stdin reader thread exiting due to error.", e)
             break
 
 def start_stdin_reader() -> None:
@@ -759,41 +749,46 @@ def handle_thread_command(new_thread_id: str) -> None:
         print(f"Available threads: {', '.join(threads_str) if threads_str else 'none'}")
 
 def handle_command(cmd: str) -> bool:
-    """Handle a single command from the user. Returns False to exit.
-
-    No locks needed - only called from main thread.
-    """
+    """Handle a single command from the user. Returns False to exit."""
     global nextFile, bp_command_indices, current_breakpoint, pending_breakpoints
     # Check if we're in breakpoint context for context-aware help
     in_bp_mode = current_breakpoint is not None
     if in_bp_mode:
         thread_id = current_breakpoint[0]
 
+    splitted = cmd.strip().split()
+    if len(splitted) == 0:
+        return True
+
+    main_cmd = splitted[0]
+
+    args = " ".join(splitted[1:]) # note that these are just general args, they do not apply to all commands
+
     # Unified command handling - same commands work in both modes
-    if cmd == "exit":
+    if main_cmd == "quit" or main_cmd == "q":
         clear_state()
         return False
-    if cmd == "help":
+    if main_cmd == "help" or main_cmd == "h":
         print("Available commands:")
-        print("  help - Show this help message")
-        print("  exit - Exit the program")
-        print("  restart - Cleans the state to allow a new game to be started (this is the same as exiting and restarting the script)")
-        print("  jump <number> - use in case of closing the interpreter (or crashing) while game is still running. Starts sending commands from a specific file index. Should use the index printed in the prompt before the `>>>`")
+        print("  help/h - Show this help message")
+        print("  quit/q - Exit the program")
+        print("  restart/r - Cleans the state to allow a new game to be started (this is the same as exiting and restarting the script)")
+        print("  jump/j <number> - use in case of closing the interpreter (or crashing) while game is still running. Starts sending commands from a specific file index. Should use the index printed in the prompt before the `>>>`")
         print("  file <full file path> - send a file with lua commands to the game. end the file with `return <data>` to print the data to the console")
         print("  watch <full file path> - watch a file for changes and automatically send it to the game on each update")
         print("  unwatch <full file path> - stop watching a file")
         print("  watching - list all files currently being watched")
-        print("  list - list all threads currently in a breakpoint (current marked with *)")
-        print("  thread <id> - switch to a different breakpoint thread")
-        print("  info - show detailed info for current breakpoint thread")
-        print("  continue - resume execution of current breakpoint thread")
+        print("  list/l - list all threads currently in a breakpoint (current marked with *)")
+        print("  thread/t <id> - switch to a different breakpoint thread")
+        print("  info/i - show detailed info for current breakpoint thread")
+        print("  continue/c - resume execution of current breakpoint thread")
         print("  <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.")
         print("** Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **")
         print("** Note: OnInit calls in files sent via 'file' or 'watch' are automatically executed immediately **")
         if in_bp_mode:
             print(f"\n[Currently in breakpoint context: thread {thread_id}]")
         return True
-    if cmd == "restart":
+    if main_cmd == "restart":
         clear_state()
         nextFile = 0
         bp_command_indices = {}
@@ -803,25 +798,25 @@ def handle_command(cmd: str) -> bool:
         start_stdin_reader()
         print("State reset. You can start a new game now.")
         return True
-    if cmd.startswith("jump "):
-        nextFile = int(cmd[5:].strip())
+    if main_cmd == "jump" or main_cmd == "j":
+        nextFile = args
         return True
-    if cmd.startswith("watch "):
-        filepath = cmd[6:].strip()
+    if main_cmd == "watch":
+        filepath = args
         file_watcher.start_watching(filepath, file_change_queue)
         return True
-    if cmd.startswith("unwatch "):
-        filepath = cmd[8:].strip()
+    if main_cmd == "unwatch":
+        filepath = args
         file_watcher.stop_watching(filepath)
         return True
-    if cmd == "watching":
+    if main_cmd == "watching":
         file_watcher.list_watched_files()
         return True
-    if cmd.startswith("file "):
-        filepath = cmd[5:].strip()
+    if main_cmd == "file":
+        filepath = args
         send_file_to_game(filepath)
         return True
-    if cmd == "list":
+    if main_cmd == "list" or main_cmd == "l":
         # List all threads in breakpoint (with current marked)
         threads = parse_bp_threads_file()
         if not threads:
@@ -835,17 +830,17 @@ def handle_command(cmd: str) -> bool:
                 marker = " *" if in_bp_mode and tid_str == thread_id else ""
                 print(f"  {tid_str}: breakpoint '{bp_name}'{marker}")
         return True
-    if cmd.startswith("thread "):
-        new_thread_id = cmd[7:].strip()
+    if main_cmd == "thread" or main_cmd == "t":
+        new_thread_id = args
         handle_thread_command(new_thread_id)
         return True
-    if cmd == "info":
+    if main_cmd == "info" or main_cmd == "i":
         if in_bp_mode:
             bp_show_info(thread_id)
         else:
             print("Not in a breakpoint context. Use 'list' to see available threads.")
         return True
-    if cmd == "continue":
+    if main_cmd == "continue" or main_cmd == "c":
         if in_bp_mode:
             handle_continue_command()
         else:
@@ -861,8 +856,6 @@ def handle_breakpoint_event(thread_id: str, info: Dict[str, any]) -> None:
     """Handle a new breakpoint event.
 
     Called by check_for_new_breakpoints() when a new breakpoint is detected.
-    Note: thread_state_is_bp[thread_id] is already set by check_for_new_breakpoints()
-    before calling this function.
     """
     global current_breakpoint, pending_breakpoints
 
@@ -916,26 +909,17 @@ def main() -> None:
     print(get_prompt(), end="", flush=True)
 
     while True:
-        # Process all queues with short timeout for responsiveness
-        # Priority: breakpoints > file changes > user input
-
-        # Check for new breakpoints (highest priority - notify user immediately)
+        # Check for new breakpoints
         check_for_new_breakpoints()
 
         # Check for file changes
-        try:
+        while not file_change_queue.empty():
             filepath = file_change_queue.get_nowait()
             handle_file_change_event(filepath)
-            continue  # Check for more events
-        except Empty:
-            pass
 
         # Check for user input (with short timeout to stay responsive)
-        try:
-            command = stdin_queue.get(timeout=0.1)
-            if command is None:
-                # EOF received
-                break
+        if not stdin_queue.empty():
+            command = stdin_queue.get()
 
             cmd = command.strip()
             if cmd == "":
@@ -946,8 +930,6 @@ def main() -> None:
                 break
 
             print(get_prompt(), end="", flush=True)
-        except Empty:
-            pass
 
 if __name__ == "__main__":
     main()

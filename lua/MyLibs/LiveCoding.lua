@@ -1,6 +1,6 @@
 if Debug then Debug.beginFile("LiveCoding") end
 --[[
-Lua Live Coding v1.2.0 by Tomotz
+Lua Live Coding v1.5.0 by Tomotz
 This tool allows connecting to your game with an external cli, and run lua code in it - it allows you to open a windows terminal and run code inside your game. Works for single player and in replays
 
 Features:
@@ -9,7 +9,7 @@ Features:
  - Get command output in the terminal.
  - Run lua script files.
  - Run new code during replay and let you debug the replay.
- - Breakpoint support with per-coroutine data files for debugging.
+ - Breakpoint support allowing you to debug in the breakpoint context.
 Note that currently the interpreter does not support multiplayer (It will not run if there is more than one active player). Support for multiplayer can be added but will be a bit complicated since the backend files data needs to be synced. If I'll see a demand for the feature, I'll add it.
 
 Installation and usage instructions:
@@ -22,39 +22,26 @@ Installation and usage instructions:
  - Tip - if you want to debug a replay, run warcraft with nowfpause, and then you can alt tab to the shell without the game pausing:
     "C:\Program Files (x86)\Warcraft III\_retail_\x86_64\Warcraft III.exe" -launch -nowfpause
 
-cli commands:
- - help - Print all available commands and descriptions
- - exit - Exit the program
- - restart - Cleans the state to allow a new game to be started (this is the same as exiting and restarting the script)
- - file <full file path> - send a file with lua commands to the game. end the file with `return <data>` to print the data to the console
- - watch <full file path> - send a file to the game on each change. print the result just like `file`.
- - unwatch <full file path> - stop watching a file
- - watching - list all currently watched files
- - bp list - list all threads currently in a breakpoint
- - bp info <thread_id> - get breakpoint info for a specific thread
- - <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.
-Breakpoint mode:
- When a Breakpoint() is hit, the interpreter enters breakpoint mode.
- Commands: list, thread <id>, info, continue, help, and Lua code.
-* Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **
+Run wc3_interpreter.py and then `help` for a list of available commands.
+* Note: exiting or restarting the script while the game is running will cause a missalignment in file ids. You must use jump command to fix it
 
 Algorithm explanation:
 The lua code polls on the creation of new files with increasing indices (in0.txt, in1.txt, ...). When a new file is found, it reads the content, runs it as lua code, and saves the output to a single out.txt file with the command index.
 For breakpoints, each coroutine writes its data to a per-coroutine file (bp_data_<thread_id>.txt) and a shared metadata file (bp_threads.txt) lists all active breakpoint threads.
 
 Suggested usages:
- - Map Development - You created a new global function, you test your map and it doesn't do what you meant. You can now create a file with this function, edit what you wish, and run `file` command. The new function will run over the old one, and you can test it again without restarting wc3 and rebuilding the map.
+ - Map Development - You created a new global function, you test your map and it doesn't do what you meant. You can now create a file with this function, edit what you wish, and run `file` command. The new function will run over the old one, and you can test it again without restarting wc3 and rebuilding the map. You can also add breakpoints to inspect and change variable values
  - Value Lookups - You can check variable values and other state checks while playing (in single player). You could already do that with DebugUtils `-console`, but this was annoying to do with the limited ingame chat. If you're playing in multiplayer, you can later check the values in the replay.
  - Map Debugging - Reimplement global functions dynamically while playing, and add prints and logs as needed
  - Replay Debugging - Perform quarries or make things happen differently at replay - change values of variables, create new units etc.
 
 Requires:
-FileIO (lua) by Trokkin - https://www.hiveworkshop.com/threads/fileio-lua-optimized.347049/
+My version of FileIO (lua). Original version by Trokkin - https://www.hiveworkshop.com/threads/fileio-lua-optimized.347049/
+StringEscape (by me) - https://www.hiveworkshop.com/threads/optimized-syncstream-and-stringescape.367925/
 TotalInitialization by Bribe - https://www.hiveworkshop.com/threads/total-initialization.317099/
 
-To be able to run in replay mode of a multiplayer game, you either need
-LogUtils (by me) - https://www.hiveworkshop.com/threads/logutils.357625/
-or just to copy the `SetGameStatus` function from there and call it in your map init.
+Optionaly requires:
+PrettyString (by me) - https://www.hiveworkshop.com/threads/logutils.357625/. If you want better output formatting for tables and wc3 handles
 
 Credits:
 TriggerHappy GameStatus (Replay Detection) https://www.hiveworkshop.com/threads/gamestatus-replay-detection.293176/
