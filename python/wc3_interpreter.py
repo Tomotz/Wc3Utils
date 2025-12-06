@@ -107,25 +107,21 @@ return __wc3_interpreter_result
 end"""
 
 # Global state for breakpoint handling
-bp_monitor_thread: Optional[threading.Thread] = None  # Background thread for monitoring breakpoints
-bp_monitor_stop_event: threading.Event = threading.Event()  # Event to signal thread to stop
 bp_command_indices: Dict[str, int] = {}  # Maps thread_id to next command index (per-thread counters)
 
 # Unified interface state for breakpoint handling
 # When a breakpoint is hit, it becomes the current context and commands go to it
 # Additional breakpoints are queued and handled after the current one is continued
-# Main thread owns all state - no locks needed since other threads only push to queues
+# Main thread owns all state - no locks needed
 current_breakpoint: Optional[Tuple[str, Dict]] = None  # (thread_id, info) of current breakpoint being handled
 pending_breakpoints: List[Tuple[str, Dict]] = []  # Queue of breakpoints waiting to be handled
 
 thread_state_is_bp: Dict[str, bool] = {}  # Maps thread_id to whether it's currently in a breakpoint
-bp_state_lock: threading.Lock = threading.Lock()  # Lock for thread_state_is_bp access from monitor thread
 
 # Queues for inter-thread communication (thread-safe by design)
 # Other threads push to these, main thread reads from them
 stdin_queue: Queue = Queue()  # User input from stdin reader thread
 file_change_queue: Queue = Queue()  # File change events from watchdog
-breakpoint_queue: Queue = Queue()  # New breakpoint detections from monitor thread
 
 # Stdin reader thread
 stdin_reader_thread: Optional[threading.Thread] = None
@@ -509,61 +505,31 @@ def bp_show_info(thread_id: str):
     if stack:
         print(f"Stack trace:\n{stack}")
 
-def breakpoint_monitor_thread()-> None:
-    """Background thread that monitors for new breakpoint threads.
+def check_for_new_breakpoints() -> None:
+    """Check for new breakpoints and handle them on the main thread.
 
-    This thread reads files and pushes new breakpoint info to the queue.
+    This function is called from the main event loop to poll for new breakpoints.
+    Since it runs on the main thread, no locks are needed.
     
     Deduplication strategy:
-    - Use thread_state_is_bp (with bp_state_lock) to check if the main thread
-      has already processed this breakpoint
+    - Use thread_state_is_bp to check if we've already processed this breakpoint
     - When the main thread continues from a breakpoint, it clears
-      thread_state_is_bp[thread_id], allowing the monitor to detect the next
-      breakpoint from the same thread (even with the same bp_id)
-    
-    This approach requires a lock for the small section where we check and set
-    thread_state_is_bp, but it correctly handles the case where the same
-    breakpoint is hit multiple times from the same thread.
+      thread_state_is_bp[thread_id], allowing the next breakpoint from the same
+      thread to be detected (even with the same bp_id)
     """
-    while not bp_monitor_stop_event.is_set():
-        for thread_id_bytes in parse_bp_threads_file():
-            thread_id = thread_id_bytes.decode('utf-8', errors='replace')
-            info = parse_bp_data_file(thread_id)
-            if not info:
-                continue
+    for thread_id_bytes in parse_bp_threads_file():
+        thread_id = thread_id_bytes.decode('utf-8', errors='replace')
+        info = parse_bp_data_file(thread_id)
+        if not info:
+            continue
 
-            # Use lock to check and set thread_state_is_bp atomically
-            # This prevents race conditions where the main thread clears the flag
-            # between our check and our set
-            with bp_state_lock:
-                if thread_state_is_bp.get(thread_id, False):
-                    # Thread is already in a breakpoint (main thread hasn't continued yet)
-                    continue
-                # Mark thread as in breakpoint before pushing to queue
-                # This prevents duplicate events if we poll again before main thread processes
-                thread_state_is_bp[thread_id] = True
-            
-            # Push to queue for main thread to handle (outside the lock)
-            breakpoint_queue.put((thread_id, info))
-
-        time.sleep(0.2)  # Check every 200ms
-
-def start_breakpoint_monitor() -> None:
-    """Start the background breakpoint monitoring thread."""
-    global bp_monitor_thread
-    if bp_monitor_thread is not None and bp_monitor_thread.is_alive():
-        return
-    bp_monitor_stop_event.clear()
-    bp_monitor_thread = threading.Thread(target=breakpoint_monitor_thread, daemon=True)
-    bp_monitor_thread.start()
-
-def stop_breakpoint_monitor() -> None:
-    """Stop the background breakpoint monitoring thread."""
-    global bp_monitor_thread
-    bp_monitor_stop_event.set()
-    if bp_monitor_thread is not None:
-        bp_monitor_thread.join(timeout=1.0)
-        bp_monitor_thread = None
+        if thread_state_is_bp.get(thread_id, False):
+            # Thread is already in a breakpoint (we haven't continued yet)
+            continue
+        
+        # Mark thread as in breakpoint and handle the event
+        thread_state_is_bp[thread_id] = True
+        handle_breakpoint_event(thread_id, info)
 
 def stdin_reader_thread_func() -> None:
     """Background thread that reads stdin and pushes to queue.
@@ -653,7 +619,6 @@ def get_prompt()-> str:
 
 def clear_state():
     """Clean up all state and stop background threads."""
-    stop_breakpoint_monitor()
     stop_stdin_reader()
     file_watcher.stop_all_watchers()
     remove_all_files()
@@ -762,8 +727,7 @@ def send_file_to_game(filepath: str) -> None:
 def handle_continue_command() -> None:
     """Handle the 'continue' command to resume execution of current breakpoint thread.
     
-    Uses bp_state_lock when clearing thread_state_is_bp since the monitor thread
-    also accesses it.
+    No locks needed - only called from main thread.
     """
     global current_breakpoint, pending_breakpoints
 
@@ -776,10 +740,9 @@ def handle_continue_command() -> None:
     send_data_to_game("continue")
     print(f"Resuming thread {thread_id}...")
 
-    # Clean up state for this thread (with lock since monitor thread also accesses)
-    with bp_state_lock:
-        if thread_id in thread_state_is_bp:
-            del thread_state_is_bp[thread_id]
+    # Clean up state for this thread
+    if thread_id in thread_state_is_bp:
+        del thread_state_is_bp[thread_id]
 
     # Move to next pending breakpoint if any
     if pending_breakpoints:
@@ -860,9 +823,7 @@ def handle_command(cmd: str) -> bool:
         bp_command_indices = {}
         current_breakpoint = None
         pending_breakpoints = []
-        with bp_state_lock:
-            thread_state_is_bp.clear()
-        start_breakpoint_monitor()
+        thread_state_is_bp.clear()
         start_stdin_reader()
         print("State reset. You can start a new game now.")
         return True
@@ -921,11 +882,11 @@ def handle_command(cmd: str) -> bool:
 
 
 def handle_breakpoint_event(thread_id: str, info: Dict[str, any]) -> None:
-    """Handle a new breakpoint event from the queue.
+    """Handle a new breakpoint event.
     
-    Called by main thread when breakpoint_queue has data.
-    Note: thread_state_is_bp[thread_id] is already set by the monitor thread
-    before pushing to the queue, so we don't need to set it here.
+    Called by check_for_new_breakpoints() when a new breakpoint is detected.
+    Note: thread_state_is_bp[thread_id] is already set by check_for_new_breakpoints()
+    before calling this function.
     """
     global current_breakpoint, pending_breakpoints
     
@@ -943,17 +904,12 @@ def handle_breakpoint_event(thread_id: str, info: Dict[str, any]) -> None:
         print(f"[Note: this breakpoint is queued; current context stays at {current_breakpoint[0][:8]}... until you 'continue']", flush=True)
 
 def pump_breakpoint_events_once() -> None:
-    """Drain any pending breakpoint events and apply them on the main thread.
+    """Check for new breakpoints and handle them on the main thread.
     
     This helper allows both main() and E2E tests to process breakpoint events
     while maintaining the invariant that only the main thread mutates state.
     """
-    while True:
-        try:
-            thread_id, info = breakpoint_queue.get_nowait()
-            handle_breakpoint_event(thread_id, info)
-        except Empty:
-            break
+    check_for_new_breakpoints()
 
 def handle_file_change_event(filepath: str) -> None:
     """Handle a file change event from the queue.
@@ -965,14 +921,14 @@ def handle_file_change_event(filepath: str) -> None:
     print(get_prompt(), end="", flush=True)
 
 def main() -> None:
-    """Main event loop using queue-based architecture.
+    """Main event loop.
     
     The main thread does all the work:
-    - Processes user input from stdin_queue
-    - Processes file change events from file_change_queue  
-    - Processes breakpoint events from breakpoint_queue
+    - Processes user input from stdin_queue (stdin reader thread pushes to queue)
+    - Processes file change events from file_change_queue (watchdog threads push to queue)
+    - Polls for new breakpoints directly (no separate thread needed)
     
-    Other threads only push data to queues, eliminating the need for locks.
+    No locks needed since breakpoint monitoring runs on the main thread.
     """
     global current_breakpoint, pending_breakpoints
     
@@ -985,8 +941,7 @@ def main() -> None:
     signal.signal(signal.SIGSEGV, signal_handler)
     signal.signal(signal.SIGILL, signal_handler)
 
-    # Start background threads that push to queues
-    start_breakpoint_monitor()
+    # Start background stdin reader thread
     start_stdin_reader()
 
     print(f"Wc3 Interpreter {VERSION}. For help, type `help`.")

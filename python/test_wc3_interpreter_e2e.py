@@ -21,8 +21,6 @@ from pathlib import Path
 import wc3_interpreter
 from wc3_interpreter import (
     set_files_root,
-    start_breakpoint_monitor,
-    stop_breakpoint_monitor,
     thread_state_is_bp,
     parse_bp_data_file,
     send_data_to_game,
@@ -113,7 +111,6 @@ class EndToEndBreakpointTest(unittest.TestCase):
         self.lua_process = None
         self.lua_output = []
         self.lua_thread = None
-        start_breakpoint_monitor()
 
     def tearDown(self):
         """Clean up the temporary directory and Lua process."""
@@ -130,7 +127,6 @@ class EndToEndBreakpointTest(unittest.TestCase):
             shutil.rmtree(self.temp_dir)
         except Exception:
             pass
-        stop_breakpoint_monitor()
 
     def _start_lua_harness(self, test_name: str) -> subprocess.Popen:
         """Start the Lua harness as a subprocess."""
