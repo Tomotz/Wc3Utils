@@ -514,30 +514,35 @@ def breakpoint_monitor_thread()-> None:
     This thread only reads files and pushes new breakpoint info to the queue.
     All state management is done by the main thread.
     """
-    # Track which threads we've already reported to avoid duplicates
-    reported_threads: set[str] = set()
+    # Track which (thread_id, bp_id) pairs we've already reported to avoid duplicates
+    # We need to track bp_id too because the same thread can hit multiple breakpoints
+    reported_breakpoints: set[tuple[str, bytes]] = set()
     
     while not bp_monitor_stop_event.is_set():
         current_threads: set[bytes] = set(parse_bp_threads_file())
 
         for thread_id_bytes in current_threads:
             thread_id = thread_id_bytes.decode('utf-8', errors='replace')
-            
-            # Skip if we've already reported this thread
-            if thread_id in reported_threads:
-                continue
                 
             info = parse_bp_data_file(thread_id)
             if not info:
                 continue
 
+            # Get the breakpoint ID to track unique breakpoints per thread
+            bp_id = info.get('bp_id', b'')
+            breakpoint_key = (thread_id, bp_id)
+            
+            # Skip if we've already reported this specific breakpoint
+            if breakpoint_key in reported_breakpoints:
+                continue
+
             # Mark as reported and push to queue for main thread to handle
-            reported_threads.add(thread_id)
+            reported_breakpoints.add(breakpoint_key)
             breakpoint_queue.put((thread_id, info))
 
-        # Clean up reported_threads for threads no longer in breakpoint
+        # Clean up reported_breakpoints for threads no longer in breakpoint
         current_thread_strs = {t.decode('utf-8', errors='replace') for t in current_threads}
-        reported_threads = reported_threads & current_thread_strs
+        reported_breakpoints = {(tid, bpid) for tid, bpid in reported_breakpoints if tid in current_thread_strs}
 
         time.sleep(0.2)  # Check every 200ms
 
