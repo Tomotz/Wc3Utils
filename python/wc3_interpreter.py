@@ -119,6 +119,7 @@ current_breakpoint: Optional[Tuple[str, Dict]] = None  # (thread_id, info) of cu
 pending_breakpoints: List[Tuple[str, Dict]] = []  # Queue of breakpoints waiting to be handled
 
 thread_state_is_bp: Dict[str, bool] = {}  # Maps thread_id to whether it's currently in a breakpoint
+bp_state_lock: threading.Lock = threading.Lock()  # Lock for thread_state_is_bp access from monitor thread
 
 # Queues for inter-thread communication (thread-safe by design)
 # Other threads push to these, main thread reads from them
@@ -511,38 +512,39 @@ def bp_show_info(thread_id: str):
 def breakpoint_monitor_thread()-> None:
     """Background thread that monitors for new breakpoint threads.
 
-    This thread only reads files and pushes new breakpoint info to the queue.
-    All state management is done by the main thread.
-    """
-    # Track which (thread_id, bp_id) pairs we've already reported to avoid duplicates
-    # We need to track bp_id too because the same thread can hit multiple breakpoints
-    reported_breakpoints: set[tuple[str, bytes]] = set()
+    This thread reads files and pushes new breakpoint info to the queue.
     
+    Deduplication strategy:
+    - Use thread_state_is_bp (with bp_state_lock) to check if the main thread
+      has already processed this breakpoint
+    - When the main thread continues from a breakpoint, it clears
+      thread_state_is_bp[thread_id], allowing the monitor to detect the next
+      breakpoint from the same thread (even with the same bp_id)
+    
+    This approach requires a lock for the small section where we check and set
+    thread_state_is_bp, but it correctly handles the case where the same
+    breakpoint is hit multiple times from the same thread.
+    """
     while not bp_monitor_stop_event.is_set():
-        current_threads: set[bytes] = set(parse_bp_threads_file())
-
-        for thread_id_bytes in current_threads:
+        for thread_id_bytes in parse_bp_threads_file():
             thread_id = thread_id_bytes.decode('utf-8', errors='replace')
-                
             info = parse_bp_data_file(thread_id)
             if not info:
                 continue
 
-            # Get the breakpoint ID to track unique breakpoints per thread
-            bp_id = info.get('bp_id', b'')
-            breakpoint_key = (thread_id, bp_id)
+            # Use lock to check and set thread_state_is_bp atomically
+            # This prevents race conditions where the main thread clears the flag
+            # between our check and our set
+            with bp_state_lock:
+                if thread_state_is_bp.get(thread_id, False):
+                    # Thread is already in a breakpoint (main thread hasn't continued yet)
+                    continue
+                # Mark thread as in breakpoint before pushing to queue
+                # This prevents duplicate events if we poll again before main thread processes
+                thread_state_is_bp[thread_id] = True
             
-            # Skip if we've already reported this specific breakpoint
-            if breakpoint_key in reported_breakpoints:
-                continue
-
-            # Mark as reported and push to queue for main thread to handle
-            reported_breakpoints.add(breakpoint_key)
+            # Push to queue for main thread to handle (outside the lock)
             breakpoint_queue.put((thread_id, info))
-
-        # Clean up reported_breakpoints for threads no longer in breakpoint
-        current_thread_strs = {t.decode('utf-8', errors='replace') for t in current_threads}
-        reported_breakpoints = {(tid, bpid) for tid, bpid in reported_breakpoints if tid in current_thread_strs}
 
         time.sleep(0.2)  # Check every 200ms
 
@@ -760,7 +762,8 @@ def send_file_to_game(filepath: str) -> None:
 def handle_continue_command() -> None:
     """Handle the 'continue' command to resume execution of current breakpoint thread.
     
-    No locks needed - only called from main thread.
+    Uses bp_state_lock when clearing thread_state_is_bp since the monitor thread
+    also accesses it.
     """
     global current_breakpoint, pending_breakpoints
 
@@ -773,9 +776,10 @@ def handle_continue_command() -> None:
     send_data_to_game("continue")
     print(f"Resuming thread {thread_id}...")
 
-    # Clean up state for this thread
-    if thread_id in thread_state_is_bp:
-        del thread_state_is_bp[thread_id]
+    # Clean up state for this thread (with lock since monitor thread also accesses)
+    with bp_state_lock:
+        if thread_id in thread_state_is_bp:
+            del thread_state_is_bp[thread_id]
 
     # Move to next pending breakpoint if any
     if pending_breakpoints:
@@ -856,7 +860,8 @@ def handle_command(cmd: str) -> bool:
         bp_command_indices = {}
         current_breakpoint = None
         pending_breakpoints = []
-        thread_state_is_bp.clear()
+        with bp_state_lock:
+            thread_state_is_bp.clear()
         start_breakpoint_monitor()
         start_stdin_reader()
         print("State reset. You can start a new game now.")
@@ -919,15 +924,10 @@ def handle_breakpoint_event(thread_id: str, info: Dict[str, any]) -> None:
     """Handle a new breakpoint event from the queue.
     
     Called by main thread when breakpoint_queue has data.
+    Note: thread_state_is_bp[thread_id] is already set by the monitor thread
+    before pushing to the queue, so we don't need to set it here.
     """
     global current_breakpoint, pending_breakpoints
-    
-    # Check if we already know about this thread
-    if thread_state_is_bp.get(thread_id, False):
-        return
-    
-    # Mark thread as in breakpoint
-    thread_state_is_bp[thread_id] = True
     
     # Update state
     if current_breakpoint is None:
