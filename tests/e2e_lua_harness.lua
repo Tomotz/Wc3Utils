@@ -360,10 +360,12 @@ local function test_breakpoint_four_sequential()
         counter, message = Breakpoint("bp3", {{"counter", counter}, {"message", message}}, "return false")
         print("bp3 skipped (condition false)! counter=" .. tostring(counter) .. ", message=" .. tostring(message))
 
-        -- bp4: no condition - should hit
-        print("About to hit bp4 with counter=" .. counter .. ", message=" .. message)
-        counter, message = Breakpoint("bp4", {{"counter", counter}, {"message", message}})
-        print("bp4 continued! counter=" .. tostring(counter) .. ", message=" .. tostring(message))
+        for i = 1, 2 do
+            -- bp4: no condition - should hit
+            print("About to hit bp4 with counter=" .. counter .. ", message=" .. message)
+            counter, message = Breakpoint("bp4", {{"counter", counter}, {"message", message}})
+            print("bp4 continued! counter=" .. tostring(counter) .. ", message=" .. tostring(message))
+        end
 
         finalCounter = counter
         finalMessage = message

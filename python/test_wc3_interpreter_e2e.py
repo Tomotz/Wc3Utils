@@ -299,6 +299,7 @@ class EndToEndBreakpointTest(unittest.TestCase):
         bp2: condition always true - should hit
         bp3: condition always false - should be skipped
         bp4: no condition - should hit
+        bp4 should be hit twice
 
         Verifies:
         - Breakpoints are hit in order
@@ -389,6 +390,20 @@ class EndToEndBreakpointTest(unittest.TestCase):
         result = send_breakpoint_command(thread_id4, "return message")
         self.assertIsNotNone(result)
         self.assertEqual(result.strip(), "bp4")
+
+        # Continue from bp4
+        handle_command("continue")
+
+        # 4) Hit bp4 again (no condition, should hit)
+        thread_id4 = self._wait_for_breakpoint()
+        self.assertEqual(thread_id4, thread_id)  # same coroutine/thread
+        info4 = parse_bp_data_file(thread_id4)
+        self.assertIsNotNone(info4)
+        self.assertEqual(info4.get('bp_id'), b'bp4')  # bp3 was skipped
+        locals_values4 = info4.get('locals_values', {})
+        # Values should be what we set at bp2 (bp3 was skipped)
+        self.assertEqual(locals_values4.get(b'counter'), b'3')
+        self.assertEqual(locals_values4.get(b'message'), b'bp4')
 
         # Continue from bp4
         handle_command("continue")
