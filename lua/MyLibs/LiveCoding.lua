@@ -203,7 +203,7 @@ end
 --- Put a breakpoint in your code that will halt execution of a function and wait for external debugger instructions.
 --- Returns the (potentially modified) local variable values in the same order as the input array.
 --- Usage: `var1, var2 = Breakpoint(id, {{"var1", var1}, {"var2", var2}})`
----@param breakpointId string -- Unique id for the breakpoint. Used for auto breakpoints set from the debugger. When called from user code, it should contain a unique string to allow you to recognise the breakpoint.
+---@param breakpointId string -- Unique id for the breakpoint. Used for auto breakpoints set from the debugger. When called from user code, it should contain a unique string (that is not a number - as numbers are reserved for dynamic breakpoints) to allow you to recognise the breakpoint.
 ---@param localVariables {[1]: string, [2]: any}[]? -- Array of {name, value} pairs. Will be used as the environment in the code called from the debugger. The values can be modified by the debugger and will be returned when the breakpoint continues.
 ---@param condition string? -- a string containing a lua expression. Breakpoint will only trigger if the expression is true.
 ---@param startsEnabled boolean? -- if false, the breakpoint will start disabled and must be enabled from the debugger. Default is true. This allows you to dynamically enable a static breakpoint (which can be set anywhere in the code unlike the dynamic one)
