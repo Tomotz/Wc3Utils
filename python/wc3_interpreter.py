@@ -765,7 +765,7 @@ def handle_command(cmd: str) -> bool:
     args = " ".join(splitted[1:]) # note that these are just general args, they do not apply to all commands
 
     # Unified command handling - same commands work in both modes
-    if main_cmd == "quit" or main_cmd == "q":
+    if main_cmd in ("quit", "q", "exit"):
         clear_state()
         return False
     if main_cmd == "help" or main_cmd == "h":
@@ -801,7 +801,7 @@ def handle_command(cmd: str) -> bool:
         print("State reset. You can start a new game now.")
         return True
     if main_cmd == "jump" or main_cmd == "j":
-        nextFile = args
+        nextFile = int(args)
         return True
     if main_cmd == "watch":
         filepath = args
