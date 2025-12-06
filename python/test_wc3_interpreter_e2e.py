@@ -27,7 +27,6 @@ from wc3_interpreter import (
     parse_bp_data_file,
     send_data_to_game,
     bp_command_indices,
-    bp_state_lock,
     handle_command,
     create_file,
     load_file,
@@ -40,9 +39,10 @@ def send_breakpoint_command(thread_id: str, command: str):
     In tests we don't have the monitor thread; we drive the context directly.
     This helper sets current_breakpoint to the given thread_id, then calls
     send_data_to_game which will route via bp_in/bp_out based on that context.
+    
+    No lock needed - in the new architecture, all state is owned by the main thread.
     """
-    with bp_state_lock:
-        wc3_interpreter.current_breakpoint = (thread_id, {"thread_id": thread_id})
+    wc3_interpreter.current_breakpoint = (thread_id, {"thread_id": thread_id})
     return send_data_to_game(command)
 
 
