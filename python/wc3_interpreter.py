@@ -613,45 +613,36 @@ def send_data_to_game(data: str, print_prompt_after: bool = False) -> Optional[s
                 thread_id = current_breakpoint[0]
 
         if in_breakpoint:
-            # Breakpoint mode: use bp_in/bp_out files
-            if thread_id not in bp_command_indices:
-                bp_command_indices[thread_id] = 0
-
-            cmd_index = bp_command_indices[thread_id]
-            bp_command_indices[thread_id] += 1
-
-            # Write command to bp_in_<thread_id>_<cmd_index>.txt
-            filename = os.path.join(FILES_ROOT, f"bp_in_{thread_id}_{cmd_index}.txt")
-
+            cmd_index = bp_command_indices.get(thread_id, 0)
+            bp_command_indices[thread_id] = cmd_index + 1
             expected_prefix = f"{thread_id}:{cmd_index}"
+            # Breakpoint mode: use bp_in/bp_out files
+            in_file = os.path.join(FILES_ROOT, f"bp_in_{thread_id}_{cmd_index}.txt")
             out_file = os.path.join(FILES_ROOT, "bp_out.txt")
         else:
-            # Normal mode: use in/out files
+            thread_id = ""
+
             cmd_index = nextFile
             nextFile += 1
-            filename = os.path.join(FILES_ROOT, f"in{cmd_index}.txt")
-            thread_id = ""
             expected_prefix = f"{cmd_index}"
+            # Normal mode: use in/out files
+            in_file = os.path.join(FILES_ROOT, f"in{cmd_index}.txt")
             out_file = os.path.join(FILES_ROOT, "out.txt")
 
-        create_file(filename, data)
+        create_file(in_file, data)
+        debug = os.environ.get('WC3_E2E_DEBUG')
+        if debug:
+            print(f"[DEBUG] send_data_to_game thread_id={thread_id}, cmd_index={cmd_index}. Wrote command to: {in_file}. Waiting for response with prefix: {expected_prefix}")
+
         start_time = time.time()
         timeout = 20
-        debug = os.environ.get('WC3_E2E_DEBUG')
-
-        if debug:
-            print(f"[DEBUG] send_data_to_game thread_id={thread_id}, cmd_index={cmd_index}")
-            print(f"[DEBUG] Wrote command to: {filename}")
-            print(f"[DEBUG] Waiting for response with prefix: {expected_prefix}")
-
         while time.time() - start_time < timeout:
             if os.path.exists(out_file):
                 content = parse_nonloadable_file(out_file)
                 if content:
                     index, result = parse_indexed_output(content)
                     if debug:
-                        print(f"[DEBUG] {out_file} content (first 100 bytes): {content[:100]}")
-                        print(f"[DEBUG] Parsed index: {index}, expected: {expected_prefix}")
+                        print(f"[DEBUG] {out_file} content (first 100 bytes): {content[:100]}. Parsed index: {index}, expected: {expected_prefix}")
                     if index and index.decode('utf-8', errors='replace') == expected_prefix:
                         if debug:
                             print(f"[DEBUG] Got matching response!")
@@ -664,11 +655,10 @@ def send_data_to_game(data: str, print_prompt_after: bool = False) -> Optional[s
             time.sleep(0.1)
 
         if debug:
-            print(f"[DEBUG] TIMEOUT waiting for {expected_prefix}")
-            print(f"[DEBUG] bp_out.txt exists: {os.path.exists(out_file)}")
+            print(f"[DEBUG] TIMEOUT waiting for {expected_prefix}. {out_file} exists: {os.path.exists(out_file)}")
             if os.path.exists(out_file):
                 content = parse_nonloadable_file(out_file)
-                print(f"[DEBUG] Final bp_out.txt content: {content}")
+                print(f"[DEBUG] Final {out_file} content: {content}")
 
         print(f"Timeout waiting for response")
         if print_prompt_after:
@@ -698,6 +688,8 @@ def handle_continue_command() -> None:
     """Handle the 'continue' command to resume execution of current breakpoint thread."""
     global current_breakpoint, pending_breakpoints
 
+    # This is wrong. bp_state_lock should lock the whole thing or else it might catch different thread ids.
+    # I want to get rid of the lock, so leaving it for now
     with bp_state_lock:
         if current_breakpoint is None:
             print("Not in a breakpoint context.")
