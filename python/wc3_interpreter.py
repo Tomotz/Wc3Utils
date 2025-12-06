@@ -153,7 +153,7 @@ class FileChangeHandler(FileSystemEventHandler):
 
 class FileWatcher:
     """File watcher that pushes change events to a queue for main thread processing.
-    
+
     No locks needed - this class is only called from the main thread.
     The watchdog Observer threads only push to the queue via FileChangeHandler.
     """
@@ -162,7 +162,7 @@ class FileWatcher:
 
     def start_watching(self, filepath: str, queue: Queue) -> bool:
         """Start watching a file for changes. Returns True if successful.
-        
+
         Args:
             filepath: Path to the file to watch
             queue: Queue to push file change events to
@@ -510,7 +510,7 @@ def check_for_new_breakpoints() -> None:
 
     This function is called from the main event loop to poll for new breakpoints.
     Since it runs on the main thread, no locks are needed.
-    
+
     Deduplication strategy:
     - Use thread_state_is_bp to check if we've already processed this breakpoint
     - When the main thread continues from a breakpoint, it clears
@@ -526,14 +526,14 @@ def check_for_new_breakpoints() -> None:
         if thread_state_is_bp.get(thread_id, False):
             # Thread is already in a breakpoint (we haven't continued yet)
             continue
-        
+
         # Mark thread as in breakpoint and handle the event
         thread_state_is_bp[thread_id] = True
         handle_breakpoint_event(thread_id, info)
 
 def stdin_reader_thread_func() -> None:
     """Background thread that reads stdin and pushes to queue.
-    
+
     This allows the main thread to use select-style polling on multiple queues
     instead of blocking on input().
     """
@@ -607,7 +607,7 @@ def print_breakpoint_hit(thread_id: str, info: Dict[str, any]) -> None:
 
 def get_prompt()-> str:
     """Get the appropriate prompt based on current context.
-    
+
     No lock needed - only called from main thread.
     """
     if current_breakpoint is not None:
@@ -726,7 +726,7 @@ def send_file_to_game(filepath: str) -> None:
 
 def handle_continue_command() -> None:
     """Handle the 'continue' command to resume execution of current breakpoint thread.
-    
+
     No locks needed - only called from main thread.
     """
     global current_breakpoint, pending_breakpoints
@@ -759,7 +759,7 @@ def handle_continue_command() -> None:
 
 def handle_thread_command(new_thread_id: str) -> None:
     """Handle the 'thread <id>' command to switch to a different breakpoint thread.
-    
+
     No locks needed - only called from main thread.
     """
     global current_breakpoint
@@ -784,7 +784,7 @@ def handle_thread_command(new_thread_id: str) -> None:
 
 def handle_command(cmd: str) -> bool:
     """Handle a single command from the user. Returns False to exit.
-    
+
     No locks needed - only called from main thread.
     """
     global nextFile, bp_command_indices, current_breakpoint, pending_breakpoints
@@ -883,37 +883,29 @@ def handle_command(cmd: str) -> bool:
 
 def handle_breakpoint_event(thread_id: str, info: Dict[str, any]) -> None:
     """Handle a new breakpoint event.
-    
+
     Called by check_for_new_breakpoints() when a new breakpoint is detected.
     Note: thread_state_is_bp[thread_id] is already set by check_for_new_breakpoints()
     before calling this function.
     """
     global current_breakpoint, pending_breakpoints
-    
+
     # Update state
     if current_breakpoint is None:
         current_breakpoint = (thread_id, info)
     else:
         pending_breakpoints.append((thread_id, info))
-    
+
     # Print the BREAKPOINT HIT message
     print_breakpoint_hit(thread_id, info)
-    
+
     # If this is a queued breakpoint, add a note about context
     if current_breakpoint[0] != thread_id:
         print(f"[Note: this breakpoint is queued; current context stays at {current_breakpoint[0][:8]}... until you 'continue']", flush=True)
 
-def pump_breakpoint_events_once() -> None:
-    """Check for new breakpoints and handle them on the main thread.
-    
-    This helper allows both main() and E2E tests to process breakpoint events
-    while maintaining the invariant that only the main thread mutates state.
-    """
-    check_for_new_breakpoints()
-
 def handle_file_change_event(filepath: str) -> None:
     """Handle a file change event from the queue.
-    
+
     Called by main thread when file_change_queue has data.
     """
     print(f"\n[watch] File changed: {filepath}")
@@ -922,16 +914,16 @@ def handle_file_change_event(filepath: str) -> None:
 
 def main() -> None:
     """Main event loop.
-    
+
     The main thread does all the work:
     - Processes user input from stdin_queue (stdin reader thread pushes to queue)
     - Processes file change events from file_change_queue (watchdog threads push to queue)
     - Polls for new breakpoints directly (no separate thread needed)
-    
+
     No locks needed since breakpoint monitoring runs on the main thread.
     """
     global current_breakpoint, pending_breakpoints
-    
+
     remove_all_files()
     # add a signal handler that handles all signals by removing all files and calling the default handler
 
@@ -946,14 +938,14 @@ def main() -> None:
 
     print(f"Wc3 Interpreter {VERSION}. For help, type `help`.")
     print(get_prompt(), end="", flush=True)
-    
+
     while True:
         # Process all queues with short timeout for responsiveness
         # Priority: breakpoints > file changes > user input
-        
+
         # Check for new breakpoints (highest priority - notify user immediately)
-        pump_breakpoint_events_once()
-        
+        check_for_new_breakpoints()
+
         # Check for file changes
         try:
             filepath = file_change_queue.get_nowait()
@@ -961,22 +953,22 @@ def main() -> None:
             continue  # Check for more events
         except Empty:
             pass
-        
+
         # Check for user input (with short timeout to stay responsive)
         try:
             command = stdin_queue.get(timeout=0.1)
             if command is None:
                 # EOF received
                 break
-            
+
             cmd = command.strip()
             if cmd == "":
                 print(get_prompt(), end="", flush=True)
                 continue
-            
+
             if not handle_command(cmd):
                 break
-            
+
             print(get_prompt(), end="", flush=True)
         except Empty:
             pass
