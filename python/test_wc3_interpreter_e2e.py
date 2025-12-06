@@ -30,6 +30,7 @@ from wc3_interpreter import (
     handle_command,
     create_file,
     load_file,
+    pump_breakpoint_events_once,
 )
 
 
@@ -50,9 +51,18 @@ def wait_for_new_breakpoint(timeout: float = 30.0):
     """Wait for a new breakpoint to be hit and return the thread ID.
 
     Returns the thread_id (str) if a new breakpoint is detected, None on timeout.
+    
+    In the queue-based architecture, the breakpoint monitor thread pushes events
+    to breakpoint_queue, but only the main thread (or test thread acting as main)
+    should update thread_state_is_bp. We call pump_breakpoint_events_once() to
+    drain the queue and update state before checking.
     """
     start = time.time()
     while time.time() - start < timeout:
+        # Drain any pending breakpoint events from the queue
+        # This updates thread_state_is_bp on the test thread (acting as main thread)
+        pump_breakpoint_events_once()
+        
         threads = thread_state_is_bp.keys()
         current_threads = set(threads)
         for thread_id in current_threads:

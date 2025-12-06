@@ -942,6 +942,19 @@ def handle_breakpoint_event(thread_id: str, info: Dict[str, any]) -> None:
     if current_breakpoint[0] != thread_id:
         print(f"[Note: this breakpoint is queued; current context stays at {current_breakpoint[0][:8]}... until you 'continue']", flush=True)
 
+def pump_breakpoint_events_once() -> None:
+    """Drain any pending breakpoint events and apply them on the main thread.
+    
+    This helper allows both main() and E2E tests to process breakpoint events
+    while maintaining the invariant that only the main thread mutates state.
+    """
+    while True:
+        try:
+            thread_id, info = breakpoint_queue.get_nowait()
+            handle_breakpoint_event(thread_id, info)
+        except Empty:
+            break
+
 def handle_file_change_event(filepath: str) -> None:
     """Handle a file change event from the queue.
     
@@ -984,12 +997,7 @@ def main() -> None:
         # Priority: breakpoints > file changes > user input
         
         # Check for new breakpoints (highest priority - notify user immediately)
-        try:
-            thread_id, info = breakpoint_queue.get_nowait()
-            handle_breakpoint_event(thread_id, info)
-            continue  # Check for more breakpoints before other events
-        except Empty:
-            pass
+        pump_breakpoint_events_once()
         
         # Check for file changes
         try:
