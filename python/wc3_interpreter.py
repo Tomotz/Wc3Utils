@@ -782,6 +782,8 @@ def handle_command(cmd: str) -> bool:
         print("  thread/t <id> - switch to a different breakpoint thread")
         print("  info/i - show detailed info for current breakpoint thread")
         print("  continue/c - resume execution of current breakpoint thread")
+        print("  enable <breakpoint_id> - enable a breakpoint by its ID")
+        print("  disable <breakpoint_id> - disable a breakpoint by its ID")
         print("  <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.")
         print("** Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **")
         print("** Note: OnInit calls in files sent via 'file' or 'watch' are automatically executed immediately **")
@@ -845,6 +847,22 @@ def handle_command(cmd: str) -> bool:
             handle_continue_command()
         else:
             print("Not in a breakpoint context.")
+        return True
+    if main_cmd == "enable":
+        if not args:
+            print("Usage: enable <breakpoint_id>")
+            return True
+        lua_cmd = f'EnabledBreakpoints["{args}"] = true'
+        send_data_to_game(lua_cmd)
+        print(f"Enabled breakpoint '{args}'")
+        return True
+    if main_cmd == "disable":
+        if not args:
+            print("Usage: disable <breakpoint_id>")
+            return True
+        lua_cmd = f'EnabledBreakpoints["{args}"] = false'
+        send_data_to_game(lua_cmd)
+        print(f"Disabled breakpoint '{args}'")
         return True
 
     # Send Lua command to game via unified interface
