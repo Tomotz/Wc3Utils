@@ -7,7 +7,6 @@ import re
 import time
 import signal
 import sys
-import select
 import threading
 from queue import Queue, Empty
 from typing import Optional, Callable, Dict, List, Tuple
@@ -534,38 +533,15 @@ def check_for_new_breakpoints() -> None:
 def stdin_reader_thread_func() -> None:
     """Background thread that reads stdin and pushes to queue.
 
-    This allows the main thread to use select-style polling on multiple queues
-    instead of blocking on input().
+    Uses blocking input() since this runs in a separate thread.
     """
     while not stdin_reader_stop_event.is_set():
-        # Use select to check if stdin has data (works on Unix)
-        # On Windows, select doesn't work with stdin, so we fall back to blocking read
         try:
-            if sys.platform != 'win32':
-                # Unix: use select with timeout
-                readable, _, _ = select.select([sys.stdin], [], [], 0.1)
-                if readable:
-                    line = sys.stdin.readline()
-                    if line:
-                        stdin_queue.put(line.rstrip('\n'))
-                    else:
-                        # EOF
-                        stdin_queue.put(None)
-                        break
-            else:
-                # Windows: blocking read with timeout simulation
-                # We can't use select on stdin on Windows, so we just do a blocking read
-                # This is less responsive but still works
-                import msvcrt
-                if msvcrt.kbhit():
-                    line = sys.stdin.readline()
-                    if line:
-                        stdin_queue.put(line.rstrip('\n'))
-                    else:
-                        stdin_queue.put(None)
-                        break
-                else:
-                    time.sleep(0.1)
+            line = input()
+            stdin_queue.put(line)
+        except EOFError:
+            stdin_queue.put(None)
+            break
         except Exception:
             # If stdin is closed or there's an error, exit the thread
             stdin_queue.put(None)
