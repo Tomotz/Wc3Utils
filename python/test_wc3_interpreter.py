@@ -466,24 +466,26 @@ def mock_main_environment(commands, capture_print=False, track_calls=False):
     """Context manager to set up common mocks for testing main().
 
     Args:
-        commands: List of commands to simulate user input
+        commands: List of commands to feed to stdin_queue (new queue-based architecture)
         capture_print: If True, captures print output and yields it as a list
         track_calls: If True, tracks calls to remove_all_files and stop_all_watchers
 
     Yields:
         dict with 'output' (if capture_print), 'remove_calls' and 'stop_calls' (if track_calls)
     """
-    command_iter = iter(commands)
+    from queue import Queue
     result = {}
 
-    def fake_input(prompt):
-        return next(command_iter)
+    # Create a pre-populated queue with the test commands
+    test_queue = Queue()
+    for cmd in commands:
+        test_queue.put(cmd)
 
     patches = [
-        patch.object(wc3_interpreter, 'input', side_effect=fake_input),
+        patch.object(wc3_interpreter, 'stdin_queue', test_queue),
         patch.object(wc3_interpreter.signal, 'signal'),
-        patch.object(wc3_interpreter, 'start_breakpoint_monitor'),
-        patch.object(wc3_interpreter, 'stop_breakpoint_monitor'),
+        patch.object(wc3_interpreter, 'start_stdin_reader'),  # Don't start real stdin reader
+        patch.object(wc3_interpreter, 'stop_stdin_reader'),   # Don't stop real stdin reader
     ]
 
     if capture_print:
@@ -591,27 +593,29 @@ class TestFileCommand(unittest.TestCase):
 
     def test_main_handles_file_command(self):
         """Test that main() handles the 'file' command."""
+        from queue import Queue
+        
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
             f.write("return 42")
             temp_path = f.name
 
         try:
-            commands = iter([f"file {temp_path}", "exit"])
+            # Create a pre-populated queue with the test commands
+            test_queue = Queue()
+            test_queue.put(f"file {temp_path}")
+            test_queue.put("exit")
             sent_files = []
-
-            def fake_input(prompt):
-                return next(commands)
 
             def mock_send_file_to_game(filepath):
                 sent_files.append(filepath)
 
-            with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
+            with patch.object(wc3_interpreter, 'stdin_queue', test_queue), \
                  patch.object(wc3_interpreter, 'remove_all_files'), \
                  patch.object(wc3_interpreter.file_watcher, 'stop_all_watchers'), \
                  patch.object(wc3_interpreter, 'send_file_to_game', side_effect=mock_send_file_to_game), \
                  patch.object(wc3_interpreter.signal, 'signal'), \
-                 patch.object(wc3_interpreter, 'start_breakpoint_monitor'), \
-                 patch.object(wc3_interpreter, 'stop_breakpoint_monitor'), \
+                 patch.object(wc3_interpreter, 'start_stdin_reader'), \
+                 patch.object(wc3_interpreter, 'stop_stdin_reader'), \
                  patch('builtins.print'):
                 wc3_interpreter.main()
 

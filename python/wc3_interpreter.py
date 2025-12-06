@@ -1,14 +1,14 @@
 
 # wc3_interpreter.py
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 import os
 import re
 import time
 import signal
 import sys
-import traceback
 import threading
+from queue import Queue, Empty
 from typing import Optional, Callable, Dict, List, Tuple
 
 # Optional watchdog import for file watching functionality
@@ -106,29 +106,35 @@ return __wc3_interpreter_result
 end"""
 
 # Global state for breakpoint handling
-bp_monitor_thread: Optional[threading.Thread] = None  # Background thread for monitoring breakpoints
-bp_monitor_stop_event: threading.Event = threading.Event()  # Event to signal thread to stop
 bp_command_indices: Dict[str, int] = {}  # Maps thread_id to next command index (per-thread counters)
 
 # Unified interface state for breakpoint handling
 # When a breakpoint is hit, it becomes the current context and commands go to it
 # Additional breakpoints are queued and handled after the current one is continued
-# These are accessed from both the monitor thread and main thread, so we use a lock
-bp_state_lock: threading.Lock = threading.Lock()  # Lock for breakpoint state
+# Main thread owns all state - no locks needed
 current_breakpoint: Optional[Tuple[str, Dict]] = None  # (thread_id, info) of current breakpoint being handled
 pending_breakpoints: List[Tuple[str, Dict]] = []  # Queue of breakpoints waiting to be handled
 
 thread_state_is_bp: Dict[str, bool] = {}  # Maps thread_id to whether it's currently in a breakpoint
 
+# Queues for inter-thread communication (thread-safe by design)
+# Other threads push to these, main thread reads from them
+stdin_queue: Queue = Queue()  # User input from stdin reader thread
+file_change_queue: Queue = Queue()  # File change events from watchdog
+
+# Stdin reader thread
+stdin_reader_thread: Optional[threading.Thread] = None
+stdin_reader_stop_event: threading.Event = threading.Event()
+
 # Field separator for breakpoint data files (ASCII 31 = unit separator)
 FIELD_SEP = bytes([31])
 
 class FileChangeHandler(FileSystemEventHandler):
-    """Handler for file change events that sends the file to the game"""
-    def __init__(self, filepath: str, send_callback: Callable[[str], None]):
+    """Handler for file change events that pushes to a queue for main thread processing"""
+    def __init__(self, filepath: str, queue: Queue):
         super().__init__()
         self.filepath = os.path.abspath(filepath)
-        self.send_callback = send_callback
+        self.queue = queue
         self.last_modified = 0
 
     def on_modified(self, event) -> None:
@@ -141,16 +147,25 @@ class FileChangeHandler(FileSystemEventHandler):
             if current_time - self.last_modified < 0.5:
                 return
             self.last_modified = current_time
-            print(f"\n[watch] File changed: {self.filepath}")
-            self.send_callback(self.filepath)
+            # Push to queue - main thread will handle the actual work
+            self.queue.put(self.filepath)
 
 class FileWatcher:
+    """File watcher that pushes change events to a queue for main thread processing.
+
+    No locks needed - this class is only called from the main thread.
+    The watchdog Observer threads only push to the queue via FileChangeHandler.
+    """
     # Global state for file watching
     watched_files: Dict[str, any] = {}  # filepath -> Observer
-    file_watch_lock: threading.Lock = threading.Lock()
 
-    def start_watching(self, filepath: str, send_callback: Callable[[str], None]) -> bool:
-        """Start watching a file for changes. Returns True if successful."""
+    def start_watching(self, filepath: str, queue: Queue) -> bool:
+        """Start watching a file for changes. Returns True if successful.
+
+        Args:
+            filepath: Path to the file to watch
+            queue: Queue to push file change events to
+        """
         if not WATCHDOG_AVAILABLE:
             print("watch: watchdog is not installed. Install it with `pip install watchdog` to use watch/unwatch.")
             return False
@@ -161,52 +176,48 @@ class FileWatcher:
             print(f"Error: File does not exist: {filepath}")
             return False
 
-        with self.file_watch_lock:
-            if filepath in self.watched_files:
-                print(f"Already watching: {filepath}")
-                return False
+        if filepath in self.watched_files:
+            print(f"Already watching: {filepath}")
+            return False
 
-            directory = os.path.dirname(filepath)
-            handler = FileChangeHandler(filepath, send_callback)
-            observer = Observer()
-            observer.schedule(handler, directory, recursive=False)
-            observer.start()
-            self.watched_files[filepath] = observer
-            print(f"Now watching: {filepath}")
-            return True
+        directory = os.path.dirname(filepath)
+        handler = FileChangeHandler(filepath, queue)
+        observer = Observer()
+        observer.schedule(handler, directory, recursive=False)
+        observer.start()
+        self.watched_files[filepath] = observer
+        print(f"Now watching: {filepath}")
+        return True
 
     def stop_watching(self, filepath: str) -> bool:
         """Stop watching a file. Returns True if successful."""
         filepath = os.path.abspath(filepath)
 
-        with self.file_watch_lock:
-            if filepath not in self.watched_files:
-                print(f"Not watching: {filepath}")
-                return False
+        if filepath not in self.watched_files:
+            print(f"Not watching: {filepath}")
+            return False
 
-            observer = self.watched_files.pop(filepath)
-            observer.stop()
-            observer.join(timeout=1.0)
-            print(f"Stopped watching: {filepath}")
-            return True
+        observer = self.watched_files.pop(filepath)
+        observer.stop()
+        observer.join(timeout=1.0)
+        print(f"Stopped watching: {filepath}")
+        return True
 
     def stop_all_watchers(self) -> None:
         """Stop all file watchers."""
-        with self.file_watch_lock:
-            for filepath, observer in list(self.watched_files.items()):
-                observer.stop()
-                observer.join(timeout=1.0)
-            self.watched_files.clear()
+        for filepath, observer in list(self.watched_files.items()):
+            observer.stop()
+            observer.join(timeout=1.0)
+        self.watched_files.clear()
 
     def list_watched_files(self) -> None:
         """List all currently watched files."""
-        with self.file_watch_lock:
-            if not self.watched_files:
-                print("No files being watched.")
-            else:
-                print("Currently watching:")
-                for filepath in self.watched_files:
-                    print(f"  {filepath}")
+        if not self.watched_files:
+            print("No files being watched.")
+        else:
+            print("Currently watching:")
+            for filepath in self.watched_files:
+                print(f"  {filepath}")
 
 file_watcher = FileWatcher()
 
@@ -493,59 +504,65 @@ def bp_show_info(thread_id: str):
     if stack:
         print(f"Stack trace:\n{stack}")
 
-def breakpoint_monitor_thread()-> None:
-    """Background thread that monitors for new breakpoint threads.
+def check_for_new_breakpoints() -> None:
+    """Check for new breakpoints and handle them on the main thread.
 
-    This thread handles breakpoint state management and prints BREAKPOINT HIT messages
-    immediately when breakpoints are detected, without waiting for user input.
+    This function is called from the main event loop to poll for new breakpoints.
+    Since it runs on the main thread, no locks are needed.
+
+    Deduplication strategy:
+    - Use thread_state_is_bp to check if we've already processed this breakpoint
+    - When the main thread continues from a breakpoint, it clears
+      thread_state_is_bp[thread_id], allowing the next breakpoint from the same
+      thread to be detected (even with the same bp_id)
     """
-    global current_breakpoint, pending_breakpoints
-    while not bp_monitor_stop_event.is_set():
-        current_threads: set[bytes] = set(parse_bp_threads_file())
+    for thread_id_bytes in parse_bp_threads_file():
+        thread_id = thread_id_bytes.decode('utf-8', errors='replace')
+        info = parse_bp_data_file(thread_id)
+        if not info:
+            continue
 
-        for thread_id_bytes in current_threads:
-            thread_id = thread_id_bytes.decode('utf-8', errors='replace')
-            info = parse_bp_data_file(thread_id)
-            if not info:
-                continue
+        if thread_state_is_bp.get(thread_id, False):
+            # Thread is already in a breakpoint (we haven't continued yet)
+            continue
 
-            with bp_state_lock:
-                if thread_state_is_bp.get(thread_id, False):
-                    continue
-                # Thread was not in a breakpoint, but it is now
-                thread_state_is_bp[thread_id] = True
-                # Update state
-                if current_breakpoint is None:
-                    current_breakpoint = (thread_id, info)
-                else:
-                    pending_breakpoints.append((thread_id, info))
+        # Mark thread as in breakpoint and handle the event
+        thread_state_is_bp[thread_id] = True
+        handle_breakpoint_event(thread_id, info)
 
-                # Always print the BREAKPOINT HIT message immediately
-                # Use the same format for both current and queued breakpoints
-                print_breakpoint_hit(thread_id, info)
+def stdin_reader_thread_func() -> None:
+    """Background thread that reads stdin and pushes to queue.
 
-                # If this is a queued breakpoint, add a note about context
-                if current_breakpoint[0] != thread_id:
-                    print(f"[Note: this breakpoint is queued; current context stays at {current_breakpoint[0][:8]}... until you 'continue']", flush=True)
+    Uses blocking input() since this runs in a separate thread.
+    """
+    while not stdin_reader_stop_event.is_set():
+        try:
+            line = input()
+            stdin_queue.put(line)
+        except EOFError:
+            stdin_queue.put(None)
+            break
+        except Exception:
+            # If stdin is closed or there's an error, exit the thread
+            stdin_queue.put(None)
+            break
 
-        time.sleep(0.2)  # Check every 200ms
-
-def start_breakpoint_monitor() -> None:
-    """Start the background breakpoint monitoring thread."""
-    global bp_monitor_thread
-    if bp_monitor_thread is not None and bp_monitor_thread.is_alive():
+def start_stdin_reader() -> None:
+    """Start the background stdin reader thread."""
+    global stdin_reader_thread
+    if stdin_reader_thread is not None and stdin_reader_thread.is_alive():
         return
-    bp_monitor_stop_event.clear()
-    bp_monitor_thread = threading.Thread(target=breakpoint_monitor_thread, daemon=True)
-    bp_monitor_thread.start()
+    stdin_reader_stop_event.clear()
+    stdin_reader_thread = threading.Thread(target=stdin_reader_thread_func, daemon=True)
+    stdin_reader_thread.start()
 
-def stop_breakpoint_monitor() -> None:
-    """Stop the background breakpoint monitoring thread."""
-    global bp_monitor_thread
-    bp_monitor_stop_event.set()
-    if bp_monitor_thread is not None:
-        bp_monitor_thread.join(timeout=1.0)
-        bp_monitor_thread = None
+def stop_stdin_reader() -> None:
+    """Stop the background stdin reader thread."""
+    global stdin_reader_thread
+    stdin_reader_stop_event.set()
+    if stdin_reader_thread is not None:
+        stdin_reader_thread.join(timeout=1.0)
+        stdin_reader_thread = None
 
 def print_breakpoint_hit(thread_id: str, info: Dict[str, any]) -> None:
     """Print a message when a breakpoint is hit.
@@ -565,17 +582,20 @@ def print_breakpoint_hit(thread_id: str, info: Dict[str, any]) -> None:
     print(f"{nextFile} >>> ", flush=True, end='')
 
 def get_prompt()-> str:
-    """Get the appropriate prompt based on current context."""
-    with bp_state_lock:
-        if current_breakpoint is not None:
-            thread_id = current_breakpoint[0]
-            short_id = thread_id[:8] if len(thread_id) > 8 else thread_id
-            return f"bp:{short_id}... >>> "
-        else:
-            return f"{nextFile} >>> "
+    """Get the appropriate prompt based on current context.
+
+    No lock needed - only called from main thread.
+    """
+    if current_breakpoint is not None:
+        thread_id = current_breakpoint[0]
+        short_id = thread_id[:8] if len(thread_id) > 8 else thread_id
+        return f"bp:{short_id}... >>> "
+    else:
+        return f"{nextFile} >>> "
 
 def clear_state():
-    stop_breakpoint_monitor()
+    """Clean up all state and stop background threads."""
+    stop_stdin_reader()
     file_watcher.stop_all_watchers()
     remove_all_files()
 
@@ -585,14 +605,15 @@ def signal_handler(sig: int, frame) -> None:
     sys.exit(0)
 
 nextFile: int = 0
-send_lock: threading.Lock = threading.Lock()  # Thread safety for nextFile and file I/O
 
 def send_data_to_game(data: str, print_prompt_after: bool = False) -> Optional[str]:
-    """Send data to the game and wait for response. Thread-safe.
+    """Send data to the game and wait for response.
 
     This is the unified interface for both normal and breakpoint modes.
     - In normal mode: Uses in{N}.txt and out.txt with format "{index}FIELD_SEP{result}"
     - In breakpoint mode: Uses bp_in_{thread_id}_{idx}.txt and bp_out.txt with format "{thread_id}:{cmd_index}FIELD_SEP{result}"
+
+    No locks needed - only called from main thread.
 
     Args:
         data: The Lua code to send to the game
@@ -601,69 +622,64 @@ def send_data_to_game(data: str, print_prompt_after: bool = False) -> Optional[s
     Returns:
         The result string from the game, or None if no response/timeout
     """
-    global nextFile, bp_command_indices, current_breakpoint
+    global nextFile, bp_command_indices
     if data == "":
         return None
 
-    with send_lock:
-        # Check if we're in breakpoint context
-        with bp_state_lock:
-            in_breakpoint = current_breakpoint is not None
-            if in_breakpoint:
-                thread_id = current_breakpoint[0]
+    # Check if we're in breakpoint context
+    in_breakpoint = current_breakpoint is not None
+    if in_breakpoint:
+        thread_id = current_breakpoint[0]
+        cmd_index = bp_command_indices.get(thread_id, 0)
+        bp_command_indices[thread_id] = cmd_index + 1
+        expected_prefix = f"{thread_id}:{cmd_index}"
+        # Breakpoint mode: use bp_in/bp_out files
+        in_file = os.path.join(FILES_ROOT, f"bp_in_{thread_id}_{cmd_index}.txt")
+        out_file = os.path.join(FILES_ROOT, "bp_out.txt")
+    else:
+        thread_id = ""
+        cmd_index = nextFile
+        nextFile += 1
+        expected_prefix = f"{cmd_index}"
+        # Normal mode: use in/out files
+        in_file = os.path.join(FILES_ROOT, f"in{cmd_index}.txt")
+        out_file = os.path.join(FILES_ROOT, "out.txt")
 
-        if in_breakpoint:
-            cmd_index = bp_command_indices.get(thread_id, 0)
-            bp_command_indices[thread_id] = cmd_index + 1
-            expected_prefix = f"{thread_id}:{cmd_index}"
-            # Breakpoint mode: use bp_in/bp_out files
-            in_file = os.path.join(FILES_ROOT, f"bp_in_{thread_id}_{cmd_index}.txt")
-            out_file = os.path.join(FILES_ROOT, "bp_out.txt")
-        else:
-            thread_id = ""
+    create_file(in_file, data)
+    debug = os.environ.get('WC3_E2E_DEBUG')
+    if debug:
+        print(f"[DEBUG] send_data_to_game thread_id={thread_id}, cmd_index={cmd_index}. Wrote command to: {in_file}. Waiting for response with prefix: {expected_prefix}")
 
-            cmd_index = nextFile
-            nextFile += 1
-            expected_prefix = f"{cmd_index}"
-            # Normal mode: use in/out files
-            in_file = os.path.join(FILES_ROOT, f"in{cmd_index}.txt")
-            out_file = os.path.join(FILES_ROOT, "out.txt")
-
-        create_file(in_file, data)
-        debug = os.environ.get('WC3_E2E_DEBUG')
-        if debug:
-            print(f"[DEBUG] send_data_to_game thread_id={thread_id}, cmd_index={cmd_index}. Wrote command to: {in_file}. Waiting for response with prefix: {expected_prefix}")
-
-        start_time = time.time()
-        timeout = 20
-        while time.time() - start_time < timeout:
-            if os.path.exists(out_file):
-                content = parse_nonloadable_file(out_file)
-                if content:
-                    index, result = parse_indexed_output(content)
+    start_time = time.time()
+    timeout = 20
+    while time.time() - start_time < timeout:
+        if os.path.exists(out_file):
+            content = parse_nonloadable_file(out_file)
+            if content:
+                index, result = parse_indexed_output(content)
+                if debug:
+                    print(f"[DEBUG] {out_file} content (first 100 bytes): {content[:100]}. Parsed index: {index}, expected: {expected_prefix}")
+                if index and index.decode('utf-8', errors='replace') == expected_prefix:
                     if debug:
-                        print(f"[DEBUG] {out_file} content (first 100 bytes): {content[:100]}. Parsed index: {index}, expected: {expected_prefix}")
-                    if index and index.decode('utf-8', errors='replace') == expected_prefix:
-                        if debug:
-                            print(f"[DEBUG] Got matching response!")
-                        result_str = result.decode('utf-8', errors='replace') if result else None
-                        if result_str and result_str != "nil":
-                            print(result_str)
-                        if print_prompt_after:
-                            print(get_prompt(), end="", flush=True)
-                        return result_str
-            time.sleep(0.1)
+                        print(f"[DEBUG] Got matching response!")
+                    result_str = result.decode('utf-8', errors='replace') if result else None
+                    if result_str and result_str != "nil":
+                        print(result_str)
+                    if print_prompt_after:
+                        print(get_prompt(), end="", flush=True)
+                    return result_str
+        time.sleep(0.1)
 
-        if debug:
-            print(f"[DEBUG] TIMEOUT waiting for {expected_prefix}. {out_file} exists: {os.path.exists(out_file)}")
-            if os.path.exists(out_file):
-                content = parse_nonloadable_file(out_file)
-                print(f"[DEBUG] Final {out_file} content: {content}")
+    if debug:
+        print(f"[DEBUG] TIMEOUT waiting for {expected_prefix}. {out_file} exists: {os.path.exists(out_file)}")
+        if os.path.exists(out_file):
+            content = parse_nonloadable_file(out_file)
+            print(f"[DEBUG] Final {out_file} content: {content}")
 
-        print(f"Timeout waiting for response")
-        if print_prompt_after:
-            print(get_prompt(), end="", flush=True)
-        return None
+    print(f"Timeout waiting for response")
+    if print_prompt_after:
+        print(get_prompt(), end="", flush=True)
+    return None
 
 def wrap_with_oninit_immediate(content: str) -> str:
     """Wraps Lua content with OnInit immediate execution wrapper"""
@@ -685,38 +701,43 @@ def send_file_to_game(filepath: str) -> None:
     send_data_to_game(data, print_prompt_after=True)
 
 def handle_continue_command() -> None:
-    """Handle the 'continue' command to resume execution of current breakpoint thread."""
+    """Handle the 'continue' command to resume execution of current breakpoint thread.
+
+    No locks needed - only called from main thread.
+    """
     global current_breakpoint, pending_breakpoints
 
-    # This is wrong. bp_state_lock should lock the whole thing or else it might catch different thread ids.
-    # I want to get rid of the lock, so leaving it for now
-    with bp_state_lock:
-        if current_breakpoint is None:
-            print("Not in a breakpoint context.")
-            return
-        thread_id = current_breakpoint[0]
+    if current_breakpoint is None:
+        print("Not in a breakpoint context.")
+        return
+    thread_id = current_breakpoint[0]
 
     # Send continue command to game via unified interface
     send_data_to_game("continue")
     print(f"Resuming thread {thread_id}...")
 
-    # Move to next pending breakpoint if any
-    with bp_state_lock:
-        if pending_breakpoints:
-            next_bp = pending_breakpoints.pop(0)
-            current_breakpoint = next_bp
-            print_breakpoint_hit(next_bp[0], next_bp[1])
-            if pending_breakpoints:
-                print(f"[{len(pending_breakpoints)} more breakpoint(s) pending]")
-        else:
-            # No more breakpoints - clear current context
-            current_breakpoint = None
-            print("[Returned to normal command mode]")
+    # Clean up state for this thread
+    if thread_id in thread_state_is_bp:
         del thread_state_is_bp[thread_id]
+
+    # Move to next pending breakpoint if any
+    if pending_breakpoints:
+        next_bp = pending_breakpoints.pop(0)
+        current_breakpoint = next_bp
+        print_breakpoint_hit(next_bp[0], next_bp[1])
+        if pending_breakpoints:
+            print(f"[{len(pending_breakpoints)} more breakpoint(s) pending]")
+    else:
+        # No more breakpoints - clear current context
+        current_breakpoint = None
+        print("[Returned to normal command mode]")
 
 
 def handle_thread_command(new_thread_id: str) -> None:
-    """Handle the 'thread <id>' command to switch to a different breakpoint thread."""
+    """Handle the 'thread <id>' command to switch to a different breakpoint thread.
+
+    No locks needed - only called from main thread.
+    """
     global current_breakpoint
 
     threads = parse_bp_threads_file()
@@ -724,8 +745,7 @@ def handle_thread_command(new_thread_id: str) -> None:
     if new_thread_id in threads_str:
         new_info = parse_bp_data_file(new_thread_id)
         if new_info:
-            with bp_state_lock:
-                current_breakpoint = (new_thread_id, new_info)
+            current_breakpoint = (new_thread_id, new_info)
             print(f"Switched to thread {new_thread_id}")
             print(f"Breakpoint: {new_info.get('bp_id', 'unknown')}")
             new_locals = new_info.get('locals', [])
@@ -733,20 +753,21 @@ def handle_thread_command(new_thread_id: str) -> None:
                 print(f"Local variables: {b', '.join(new_locals)}")
         else:
             print(f"Switched to thread {new_thread_id} (no info available)")
-            with bp_state_lock:
-                current_breakpoint = (new_thread_id, {'thread_id': new_thread_id})
+            current_breakpoint = (new_thread_id, {'thread_id': new_thread_id})
     else:
         print(f"Thread '{new_thread_id}' not found in breakpoint.")
         print(f"Available threads: {', '.join(threads_str) if threads_str else 'none'}")
 
 def handle_command(cmd: str) -> bool:
-    """Handle a single command from the user. Returns False to exit."""
+    """Handle a single command from the user. Returns False to exit.
+
+    No locks needed - only called from main thread.
+    """
     global nextFile, bp_command_indices, current_breakpoint, pending_breakpoints
     # Check if we're in breakpoint context for context-aware help
-    with bp_state_lock:
-        in_bp_mode = current_breakpoint is not None
-        if in_bp_mode:
-            thread_id = current_breakpoint[0]
+    in_bp_mode = current_breakpoint is not None
+    if in_bp_mode:
+        thread_id = current_breakpoint[0]
 
     # Unified command handling - same commands work in both modes
     if cmd == "exit":
@@ -778,7 +799,8 @@ def handle_command(cmd: str) -> bool:
         bp_command_indices = {}
         current_breakpoint = None
         pending_breakpoints = []
-        start_breakpoint_monitor()
+        thread_state_is_bp.clear()
+        start_stdin_reader()
         print("State reset. You can start a new game now.")
         return True
     if cmd.startswith("jump "):
@@ -786,7 +808,7 @@ def handle_command(cmd: str) -> bool:
         return True
     if cmd.startswith("watch "):
         filepath = cmd[6:].strip()
-        file_watcher.start_watching(filepath, send_file_to_game)
+        file_watcher.start_watching(filepath, file_change_queue)
         return True
     if cmd.startswith("unwatch "):
         filepath = cmd[8:].strip()
@@ -835,7 +857,49 @@ def handle_command(cmd: str) -> bool:
     return True
 
 
+def handle_breakpoint_event(thread_id: str, info: Dict[str, any]) -> None:
+    """Handle a new breakpoint event.
+
+    Called by check_for_new_breakpoints() when a new breakpoint is detected.
+    Note: thread_state_is_bp[thread_id] is already set by check_for_new_breakpoints()
+    before calling this function.
+    """
+    global current_breakpoint, pending_breakpoints
+
+    # Update state
+    if current_breakpoint is None:
+        current_breakpoint = (thread_id, info)
+    else:
+        pending_breakpoints.append((thread_id, info))
+
+    # Print the BREAKPOINT HIT message
+    print_breakpoint_hit(thread_id, info)
+
+    # If this is a queued breakpoint, add a note about context
+    if current_breakpoint[0] != thread_id:
+        print(f"[Note: this breakpoint is queued; current context stays at {current_breakpoint[0][:8]}... until you 'continue']", flush=True)
+
+def handle_file_change_event(filepath: str) -> None:
+    """Handle a file change event from the queue.
+
+    Called by main thread when file_change_queue has data.
+    """
+    print(f"\n[watch] File changed: {filepath}")
+    send_file_to_game(filepath)
+    print(get_prompt(), end="", flush=True)
+
 def main() -> None:
+    """Main event loop.
+
+    The main thread does all the work:
+    - Processes user input from stdin_queue (stdin reader thread pushes to queue)
+    - Processes file change events from file_change_queue (watchdog threads push to queue)
+    - Polls for new breakpoints directly (no separate thread needed)
+
+    No locks needed since breakpoint monitoring runs on the main thread.
+    """
+    global current_breakpoint, pending_breakpoints
+
     remove_all_files()
     # add a signal handler that handles all signals by removing all files and calling the default handler
 
@@ -845,26 +909,45 @@ def main() -> None:
     signal.signal(signal.SIGSEGV, signal_handler)
     signal.signal(signal.SIGILL, signal_handler)
 
-    # Start the breakpoint monitor thread
-    start_breakpoint_monitor()
+    # Start background stdin reader thread
+    start_stdin_reader()
 
     print(f"Wc3 Interpreter {VERSION}. For help, type `help`.")
+    print(get_prompt(), end="", flush=True)
+
     while True:
-        # Breakpoint state is managed by the background monitor thread
-        # which prints BREAKPOINT HIT messages immediately when detected
+        # Process all queues with short timeout for responsiveness
+        # Priority: breakpoints > file changes > user input
 
-        # get console input with context-appropriate prompt
+        # Check for new breakpoints (highest priority - notify user immediately)
+        check_for_new_breakpoints()
+
+        # Check for file changes
         try:
-            command = input(get_prompt())
-        except EOFError:
-            break
+            filepath = file_change_queue.get_nowait()
+            handle_file_change_event(filepath)
+            continue  # Check for more events
+        except Empty:
+            pass
 
-        cmd = command.strip()
-        if cmd == "":
-            continue
+        # Check for user input (with short timeout to stay responsive)
+        try:
+            command = stdin_queue.get(timeout=0.1)
+            if command is None:
+                # EOF received
+                break
 
-        if not handle_command(cmd):
-            break
+            cmd = command.strip()
+            if cmd == "":
+                print(get_prompt(), end="", flush=True)
+                continue
+
+            if not handle_command(cmd):
+                break
+
+            print(get_prompt(), end="", flush=True)
+        except Empty:
+            pass
 
 if __name__ == "__main__":
     main()

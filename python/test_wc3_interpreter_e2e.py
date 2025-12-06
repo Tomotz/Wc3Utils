@@ -21,16 +21,14 @@ from pathlib import Path
 import wc3_interpreter
 from wc3_interpreter import (
     set_files_root,
-    start_breakpoint_monitor,
-    stop_breakpoint_monitor,
     thread_state_is_bp,
     parse_bp_data_file,
     send_data_to_game,
     bp_command_indices,
-    bp_state_lock,
     handle_command,
     create_file,
     load_file,
+    check_for_new_breakpoints,
 )
 
 
@@ -40,9 +38,10 @@ def send_breakpoint_command(thread_id: str, command: str):
     In tests we don't have the monitor thread; we drive the context directly.
     This helper sets current_breakpoint to the given thread_id, then calls
     send_data_to_game which will route via bp_in/bp_out based on that context.
+
+    No lock needed - in the new architecture, all state is owned by the main thread.
     """
-    with bp_state_lock:
-        wc3_interpreter.current_breakpoint = (thread_id, {"thread_id": thread_id})
+    wc3_interpreter.current_breakpoint = (thread_id, {"thread_id": thread_id})
     return send_data_to_game(command)
 
 
@@ -50,9 +49,18 @@ def wait_for_new_breakpoint(timeout: float = 30.0):
     """Wait for a new breakpoint to be hit and return the thread ID.
 
     Returns the thread_id (str) if a new breakpoint is detected, None on timeout.
+
+    In the queue-based architecture, the breakpoint monitor thread pushes events
+    to breakpoint_queue, but only the main thread (or test thread acting as main)
+    should update thread_state_is_bp. We call check_for_new_breakpoints() to
+    drain the queue and update state before checking.
     """
     start = time.time()
     while time.time() - start < timeout:
+        # Drain any pending breakpoint events from the queue
+        # This updates thread_state_is_bp on the test thread (acting as main thread)
+        check_for_new_breakpoints()
+
         threads = thread_state_is_bp.keys()
         current_threads = set(threads)
         for thread_id in current_threads:
@@ -103,7 +111,6 @@ class EndToEndBreakpointTest(unittest.TestCase):
         self.lua_process = None
         self.lua_output = []
         self.lua_thread = None
-        start_breakpoint_monitor()
 
     def tearDown(self):
         """Clean up the temporary directory and Lua process."""
@@ -120,7 +127,6 @@ class EndToEndBreakpointTest(unittest.TestCase):
             shutil.rmtree(self.temp_dir)
         except Exception:
             pass
-        stop_breakpoint_monitor()
 
     def _start_lua_harness(self, test_name: str) -> subprocess.Popen:
         """Start the Lua harness as a subprocess."""
