@@ -405,20 +405,6 @@ endfunction'''
         finally:
             os.unlink(temp_path)
 
-    def test_parse_nonloadable_file_fallback_raw_content(self):
-        """Test that parse_nonloadable_file returns raw content if no preload wrapper found."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            # Content without preload wrapper
-            content = "raw content without wrapper"
-            f.write(content)
-            temp_path = f.name
-        try:
-            result = parse_nonloadable_file(temp_path)
-            # Should return raw content as fallback
-            self.assertEqual(result, content.encode())
-        finally:
-            os.unlink(temp_path)
-
     def test_parse_nonloadable_file_expected_format(self):
         """Test that parse_nonloadable_file correctly parses the expected WC3 nonloadable format.
 
@@ -516,10 +502,10 @@ def mock_main_environment(commands, capture_print=False, track_calls=False):
         def mock_stop():
             result['stop_calls'].append(True)
         patches.append(patch.object(wc3_interpreter, 'remove_all_files', side_effect=mock_remove))
-        patches.append(patch.object(wc3_interpreter, 'stop_all_watchers', side_effect=mock_stop))
+        patches.append(patch.object(wc3_interpreter.file_watcher, 'stop_all_watchers', side_effect=mock_stop))
     else:
         patches.append(patch.object(wc3_interpreter, 'remove_all_files'))
-        patches.append(patch.object(wc3_interpreter, 'stop_all_watchers'))
+        patches.append(patch.object(wc3_interpreter.file_watcher, 'stop_all_watchers'))
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
         yield result
@@ -621,7 +607,7 @@ class TestFileCommand(unittest.TestCase):
 
             with patch.object(wc3_interpreter, 'input', side_effect=fake_input), \
                  patch.object(wc3_interpreter, 'remove_all_files'), \
-                 patch.object(wc3_interpreter, 'stop_all_watchers'), \
+                 patch.object(wc3_interpreter.file_watcher, 'stop_all_watchers'), \
                  patch.object(wc3_interpreter, 'send_file_to_game', side_effect=mock_send_file_to_game), \
                  patch.object(wc3_interpreter.signal, 'signal'), \
                  patch.object(wc3_interpreter, 'start_breakpoint_monitor'), \

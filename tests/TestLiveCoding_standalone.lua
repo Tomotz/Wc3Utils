@@ -29,6 +29,10 @@ GAME_STATUS_REPLAY = 2
 GameStatus = GAME_STATUS_OFFLINE
 bj_isSinglePlayer = true
 
+-- Field separator for breakpoint data files (ASCII 31 = unit separator)
+-- Must match FIELD_SEP in LiveCoding.lua
+local FIELD_SEP = string.char(31)
+
 -- Load required libraries
 print("=== Loading StringEscape.lua ===")
 dofile(scriptDir .. "../lua/MyLibs/StringEscape.lua")
@@ -133,12 +137,12 @@ function test_TryInterpret_enabled_in_singleplayer()
     -- Advance time to trigger the timer (which calls CheckFiles)
     TriggerSleepAction(0.02)
 
-    -- The output file should exist with the result in new format: "index\nresult"
+    -- The output file should exist with the result in new format: "indexFIELD_SEPresult"
     -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
     local result = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result ~= nil, "Output file should exist")
-    local index, value = result:match("^(%d+)\n(.*)$")
-    Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
+    local index, value = result:match("^(%d+)" .. FIELD_SEP .. "(.*)$")
+    Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index) .. " result: " .. tostring(result))
     Debug.assert(value == "executed", "Expected 'executed', got: " .. tostring(value))
 
     print("--- test_TryInterpret_enabled_in_singleplayer completed ---")
@@ -162,11 +166,11 @@ function test_TryInterpret_enabled_in_replay()
     -- Advance time to trigger the timer (which calls CheckFiles)
     TriggerSleepAction(0.02)
 
-    -- The output file should exist with the result in new format: "index\nresult"
+    -- The output file should exist with the result in new format: "indexFIELD_SEPresult"
     -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
     local result = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result ~= nil, "Output file should exist")
-    local index, value = result:match("^(%d+)\n(.*)$")
+    local index, value = result:match("^(%d+)" .. FIELD_SEP .. "(.*)$")
     Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
     Debug.assert(value == "replay_executed", "Expected 'replay_executed', got: " .. tostring(value))
 
@@ -225,11 +229,11 @@ function test_CheckFiles_handles_return_value()
     -- Advance time to trigger the timer (which calls CheckFiles)
     TriggerSleepAction(0.02)
 
-    -- Verify the output file contains the return value in new format: "index\nresult"
+    -- Verify the output file contains the return value in new format: "indexFIELD_SEPresult"
     -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
     local result = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result ~= nil, "Output file should exist")
-    local index, value = result:match("^(%d+)\n(.*)$")
+    local index, value = result:match("^(%d+)" .. FIELD_SEP .. "(.*)$")
     Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
     Debug.assert(value == "42", "Expected '42', got: " .. tostring(value))
 
@@ -254,11 +258,11 @@ function test_CheckFiles_handles_nil_return()
     -- Advance time to trigger the timer (which calls CheckFiles)
     TriggerSleepAction(0.02)
 
-    -- Verify the output file contains "nil" in new format: "index\nresult"
+    -- Verify the output file contains "nil" in new format: "indexFIELD_SEPresult"
     -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
     local result = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result ~= nil, "Output file should exist")
-    local index, value = result:match("^(%d+)\n(.*)$")
+    local index, value = result:match("^(%d+)" .. FIELD_SEP .. "(.*)$")
     Debug.assert(index == tostring(fileIdx), "Expected index " .. fileIdx .. ", got: " .. tostring(index))
     Debug.assert(value == "nil", "Expected 'nil', got: " .. tostring(value))
 
@@ -286,7 +290,7 @@ function test_CheckFiles_sequential_commands()
     -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
     local result1 = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result1 ~= nil, "Output file should exist")
-    local index1, value1 = result1:match("^(%d+)\n(.*)$")
+    local index1, value1 = result1:match("^(%d+)" .. FIELD_SEP .. "(.*)$")
     Debug.assert(index1 == tostring(fileIdx1), "Expected index " .. fileIdx1 .. ", got: " .. tostring(index1))
     Debug.assert(value1 == "first", "Expected 'first', got: " .. tostring(value1))
 
@@ -301,7 +305,7 @@ function test_CheckFiles_sequential_commands()
     -- Note: Output files are saved with isLoadable=false, so we use getRawFileContent
     local result2 = getRawFileContent("Interpreter\\out.txt")
     Debug.assert(result2 ~= nil, "Output file should exist")
-    local index2, value2 = result2:match("^(%d+)\n(.*)$")
+    local index2, value2 = result2:match("^(%d+)" .. FIELD_SEP .. "(.*)$")
     Debug.assert(index2 == tostring(fileIdx2), "Expected index " .. fileIdx2 .. ", got: " .. tostring(index2))
     Debug.assert(value2 == "second", "Expected 'second', got: " .. tostring(value2))
 
@@ -430,15 +434,11 @@ local function getBreakpointThreads()
         return {}
     end
     local threads = {}
-    for thread in content:gmatch("[^\n]+") do
+    for thread in content:gmatch("[^" .. FIELD_SEP .. "]+") do
         table.insert(threads, thread)
     end
     return threads
 end
-
--- Field separator for breakpoint data files (ASCII 31 = unit separator)
--- Must match FIELD_SEP in LiveCoding.lua
-local FIELD_SEP = string.char(31)
 
 -- Helper to get breakpoint data for a specific thread
 -- Returns a table with bp_id, locals (list derived from locals_values keys), stack, and locals_values (table)
@@ -468,7 +468,7 @@ local function getBreakpointData(threadId)
         if key == "bp_id" then
             data.bp_id = value
         elseif key == "stack" then
-            data.stack = value:gsub("\\n", "\n")
+            data.stack = value
         elseif key then
             -- Local variable value
             data.locals_values[key] = value
@@ -732,7 +732,7 @@ function test_Breakpoint_basic_with_locals()
     -- Note: bp_out.txt is saved with isLoadable=false, so we use getRawFileContent
     local bpOutContent = getRawFileContent("Interpreter\\bp_out.txt")
     Debug.assert(bpOutContent ~= nil, "bp_out.txt should exist after command")
-    local outIndex, outResult = bpOutContent:match("^([^\n]+)\n(.*)$")
+    local outIndex, outResult = bpOutContent:match("^([^" .. FIELD_SEP .. "]+)" .. FIELD_SEP .. "(.*)$")
     Debug.assert(outResult == "1000", "return gold should give 1000, got: " .. tostring(outResult))
 
     -- Test: Execute Lua code to inspect locals (return level)
@@ -744,7 +744,7 @@ function test_Breakpoint_basic_with_locals()
 
     -- Note: bp_out.txt is saved with isLoadable=false, so we use getRawFileContent
     bpOutContent = getRawFileContent("Interpreter\\bp_out.txt")
-    outIndex, outResult = bpOutContent:match("^([^\n]+)\n(.*)$")
+    outIndex, outResult = bpOutContent:match("^([^" .. FIELD_SEP .. "]+)" .. FIELD_SEP .. "(.*)$")
     Debug.assert(outResult == "5", "return level should give 5, got: " .. tostring(outResult))
 
     -- Test: Modify variables (gold = 2000 then return gold)
@@ -762,7 +762,7 @@ function test_Breakpoint_basic_with_locals()
 
     -- Note: bp_out.txt is saved with isLoadable=false, so we use getRawFileContent
     bpOutContent = getRawFileContent("Interpreter\\bp_out.txt")
-    outIndex, outResult = bpOutContent:match("^([^\n]+)\n(.*)$")
+    outIndex, outResult = bpOutContent:match("^([^" .. FIELD_SEP .. "]+)" .. FIELD_SEP .. "(.*)$")
     Debug.assert(outResult == "2000", "return gold after modification should give 2000, got: " .. tostring(outResult))
 
     -- Test: Continue execution
@@ -880,8 +880,8 @@ function test_Breakpoint_dynamic_enable_disable()
 
     -- Note: bp_out.txt is saved with isLoadable=false, so we use getRawFileContent
     local bpOutContent = getRawFileContent("Interpreter\\bp_out.txt")
-    local outIndex, outResult = bpOutContent:match("^([^\n]+)\n(.*)$")
-    Debug.assert(outResult == "false", "EnabledBreakpoints.dynamic_test should be false, got: " .. tostring(outResult))
+    local outIndex, outResult = bpOutContent:match("^([^" .. FIELD_SEP .. "]+)" .. FIELD_SEP .. "(.*)$")
+    Debug.assert(outResult == "false", "EnabledBreakpoints.dynamic_test should be false, got: " .. tostring(outResult) .. ". bpOutContent: " .. tostring(bpOutContent))
 
     -- Continue from breakpoint
     cmdIdx = bpCommandIndices[threadId]
@@ -1100,7 +1100,7 @@ function test_Breakpoint_four_sequential_with_conditions()
 
     local bpOutContent = getRawFileContent("Interpreter\\bp_out.txt")
     Debug.assert(bpOutContent ~= nil, "bp_out.txt should exist after command")
-    local outIndex, outResult = bpOutContent:match("^([^\n]+)\n(.*)$")
+    local outIndex, outResult = bpOutContent:match("^([^" .. FIELD_SEP .. "]+)" .. FIELD_SEP .. "(.*)$")
     Debug.assert(outResult == "0", "return counter at bp1 should give 0, got: " .. tostring(outResult))
 
     -- Modify counter to 1 and message to "bp1"
