@@ -333,6 +333,85 @@ local function test_breakpoint_disabled()
     print("Test completed successfully!")
 end
 
+-- Test: Enable/disable breakpoint dynamically
+-- This test has two separate breakpoints:
+-- 1. bp_first: triggers first, then Python disables bp_second
+-- 2. bp_second: should NOT trigger (disabled)
+-- 3. bp_third: triggers, then Python enables bp_second
+-- 4. bp_second (again): should trigger (re-enabled)
+local function test_breakpoint_enable_disable()
+    print("Starting breakpoint_enable_disable test...")
+
+    local testComplete = false
+    local bpHits = {}
+    local co = coroutine.create(function()
+        local step = 1
+
+        -- Step 1: Hit bp_first (enabled by default)
+        print("Step 1: About to hit bp_first")
+        step = Breakpoint("bp_first", {{"step", step}})
+        table.insert(bpHits, "bp_first")
+        print("After bp_first, step=" .. tostring(step))
+
+        -- Step 2: Hit bp_second (should be disabled by Python at this point)
+        step = 2
+        print("Step 2: About to hit bp_second (should be disabled)")
+        step = Breakpoint("bp_second", {{"step", step}})
+        -- If we get here without blocking, bp_second was disabled
+        print("After bp_second (skipped), step=" .. tostring(step))
+
+        -- Step 3: Hit bp_third (enabled by default)
+        step = 3
+        print("Step 3: About to hit bp_third")
+        step = Breakpoint("bp_third", {{"step", step}})
+        table.insert(bpHits, "bp_third")
+        print("After bp_third, step=" .. tostring(step))
+
+        -- Step 4: Hit bp_second again (should be re-enabled by Python at this point)
+        step = 4
+        print("Step 4: About to hit bp_second again (should be re-enabled)")
+        step = Breakpoint("bp_second", {{"step", step}})
+        table.insert(bpHits, "bp_second")
+        print("After bp_second (triggered), step=" .. tostring(step))
+
+        testComplete = true
+    end)
+
+    -- Start the coroutine
+    print("Starting coroutine...")
+    local success, err = coroutine.resume(co)
+    if not success then
+        error("Coroutine failed to start: " .. tostring(err))
+    end
+
+    -- The coroutine should now be waiting at the first breakpoint
+    print("Coroutine started, waiting for Python to interact...")
+
+    -- Poll and process timers/coroutines until test completes or timeout
+    local maxIterations = 600  -- 60 seconds at 0.1s per iteration
+    local iteration = 0
+    while not testComplete and iteration < maxIterations do
+        -- Advance time and process timers/coroutines
+        TriggerSleepAction(0.1)
+        processTimersAndCoroutines()
+
+        -- Check if coroutine is dead (test failed to complete)
+        if coroutine.status(co) == "dead" and not testComplete then
+            break
+        end
+
+        -- Small sleep to avoid busy waiting (real time, not simulated)
+        os.execute("sleep 0.1")
+        iteration = iteration + 1
+    end
+
+    if not testComplete then
+        error("Test did not complete - breakpoint was not continued (iterations: " .. iteration .. ")")
+    end
+
+    print("Test completed successfully! bpHits=" .. table.concat(bpHits, ", "))
+end
+
 -- Test: Four sequential breakpoints with conditions
 -- bp1: no condition, bp2: condition always true, bp3: condition always false (skipped), bp4: no condition
 local function test_breakpoint_four_sequential()
@@ -440,6 +519,8 @@ elseif testName == "breakpoint_variable_modification" then
     runTest("breakpoint_variable_modification", test_breakpoint_variable_modification)
 elseif testName == "breakpoint_four_sequential" then
     runTest("breakpoint_four_sequential", test_breakpoint_four_sequential)
+elseif testName == "breakpoint_enable_disable" then
+    runTest("breakpoint_enable_disable", test_breakpoint_enable_disable)
 else
     print("Unknown test: " .. testName)
     os.exit(1)

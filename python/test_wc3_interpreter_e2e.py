@@ -293,6 +293,77 @@ class EndToEndBreakpointTest(unittest.TestCase):
         self.lua_process.wait(timeout=5)
         self.assertEqual(self.lua_process.returncode, 0)
 
+    def test_breakpoint_enable_disable(self):
+        """Test dynamically enabling and disabling breakpoints.
+
+        This test verifies that:
+        1. A breakpoint can be disabled before it's hit (preventing it from triggering)
+        2. A breakpoint can be re-enabled after being disabled (making it trigger again)
+
+        The Lua test has 4 steps with 3 different breakpoints:
+        - bp_first: triggers first, then Python disables bp_second
+        - bp_second: should NOT trigger (disabled)
+        - bp_third: triggers, then Python enables bp_second
+        - bp_second (again): should trigger (re-enabled)
+        """
+        # Start Lua harness with enable/disable breakpoint test
+        self._start_lua_harness("breakpoint_enable_disable")
+
+        # 1) Hit bp_first (enabled by default)
+        thread_id = self._wait_for_breakpoint()
+        self.assertIsNotNone(thread_id)
+
+        # Verify we're at bp_first
+        info = parse_bp_data_file(thread_id)
+        self.assertIsNotNone(info)
+        self.assertEqual(info.get('bp_id'), b'bp_first')
+        locals_values = info.get('locals_values', {})
+        self.assertEqual(locals_values.get(b'step'), b'1')
+
+        # Disable bp_second before continuing (so it won't trigger in step 2)
+        handle_command("disable bp_second")
+
+        # Continue execution
+        handle_command("continue")
+
+        # 2) bp_second should be skipped (disabled), we should hit bp_third next
+        thread_id = self._wait_for_breakpoint()
+        self.assertIsNotNone(thread_id)
+
+        # Verify we're at bp_third (bp_second was skipped)
+        info = parse_bp_data_file(thread_id)
+        self.assertIsNotNone(info)
+        self.assertEqual(info.get('bp_id'), b'bp_third')
+        locals_values = info.get('locals_values', {})
+        self.assertEqual(locals_values.get(b'step'), b'3')
+
+        # Re-enable bp_second before continuing (so it will trigger in step 4)
+        handle_command("enable bp_second")
+
+        # Continue execution
+        handle_command("continue")
+
+        # 3) bp_second should now trigger (re-enabled)
+        thread_id = self._wait_for_breakpoint()
+        self.assertIsNotNone(thread_id)
+
+        # Verify we're at bp_second with step=4
+        info = parse_bp_data_file(thread_id)
+        self.assertIsNotNone(info)
+        self.assertEqual(info.get('bp_id'), b'bp_second')
+        locals_values = info.get('locals_values', {})
+        self.assertEqual(locals_values.get(b'step'), b'4')
+
+        # Continue execution
+        handle_command("continue")
+
+        # Wait for breakpoint to be cleared
+        self.assertTrue(self._wait_for_no_breakpoint())
+
+        # Wait for Lua process to finish
+        self.lua_process.wait(timeout=5)
+        self.assertEqual(self.lua_process.returncode, 0)
+
     def test_breakpoint_four_sequential_with_conditions(self):
         """Test 4 sequential breakpoints with conditions.
 
