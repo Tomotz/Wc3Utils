@@ -393,10 +393,9 @@ def parse_nonloadable_file(filename: str) -> Optional[bytes]:
 
     # Parse the preload wrapper and extract payload from call Preload( "..." ) lines
     # Pattern matches: call Preload( "..." ) and allows double quotes inside the payload
-    # The pattern ((?:""|[^"])*) matches either doubled quotes "" or non-quote chars,
     # stopping only at the closing " ) sequence
-    pattern = rb'call Preload\( "((?:""|[^"])*)" \)'
-    matches = re.findall(pattern, content)
+    pattern = rb'call Preload\( "(.+?)" \)'
+    matches = re.findall(pattern, content, flags=re.DOTALL)
     if matches:
         return b''.join(matches)
 
@@ -880,7 +879,8 @@ def handle_command(cmd: str) -> bool:
         lua_cmd = f'''do
     local _orig_func = _G["{func_name}"]
     if _orig_func == nil then
-        error("Function '{func_name}' not found in _G")
+        print("Error setting breakpoint: function '{func_name}' does not exist")
+        return
     end
     _G["{func_name}"] = function(...)
         local args = {{...}}

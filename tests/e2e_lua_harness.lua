@@ -496,27 +496,9 @@ local function test_dynamic_breakpoint()
 
     -- Define a global function that we'll set a breakpoint on
     function MyGlobalFunction(x, y)
-        print("MyGlobalFunction called with x=" .. tostring(x) .. ", y=" .. tostring(y))
         return x + y
     end
 
-    -- Apply the dynamic breakpoint wrapper (same code that Python's "b" command generates)
-    -- This wraps the function to call Breakpoint() before the original function
-    do
-        local _orig_func = _G["MyGlobalFunction"]
-        if _orig_func == nil then
-            error("Function 'MyGlobalFunction' not found in _G")
-        end
-        _G["MyGlobalFunction"] = function(...)
-            local args = {...}
-            local localVars = {}
-            for i, v in ipairs(args) do
-                table.insert(localVars, {"arg" .. i, v})
-            end
-            local modified = {Breakpoint("bp:MyGlobalFunction", localVars)}
-            return _orig_func(table.unpack(modified))
-        end
-    end
     print("Dynamic breakpoint wrapper applied to MyGlobalFunction")
 
     local testComplete = false
@@ -524,8 +506,16 @@ local function test_dynamic_breakpoint()
     local co = coroutine.create(function()
         print("Calling MyGlobalFunction(10, 20) - should trigger breakpoint...")
 
-        -- Call the function - this should trigger the breakpoint
-        functionResult = MyGlobalFunction(10, 20)
+        for _ = 1, 300 do
+            -- Call the function - this should trigger the breakpoint
+            local a, b = 10, 20
+            functionResult = MyGlobalFunction(a, b)
+            if functionResult ~= a + b then
+                print("Function arguments were modified at breakpoint!")
+                break
+            end
+            TriggerSleepAction(0.1)
+        end
 
         print("MyGlobalFunction returned: " .. tostring(functionResult))
         testComplete = true

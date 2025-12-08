@@ -232,6 +232,15 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
             return returnLocalValues(env, localVariables)
         end
         if not cond() then return returnLocalValues(env, localVariables) end
+        local ok, result = pcall(cond)
+        if ok then
+            if not result then
+                return returnLocalValues(env, localVariables)
+            end
+        else
+            print("Error running breakpoint condition:", result)
+            return returnLocalValues(env, localVariables)
+        end
     end
 
     -- Get thread ID and register this breakpoint
@@ -275,6 +284,7 @@ function Breakpoint(breakpointId, localVariables, condition, startsEnabled)
                 if ok then
                     outData = formatOutput(result)
                 else
+                    print("Error running breakpoint command:", result)
                     outData = "Runtime error: " .. tostring(result)
                 end
             end
@@ -318,6 +328,10 @@ function CheckFiles()
         if cur_func ~= nil then
             local ok = false
             ok, result = pcall(cur_func)
+            if not ok then
+                result = "Runtime error: " .. tostring(result)
+                print("Error running live coding command:", result)
+            end
         end
         -- Use shared output format: index on first line, result on subsequent lines
         writeIndexedOutput(FILES_ROOT .. "\\out.txt", nextFile, tostring(result))

@@ -378,6 +378,8 @@ class EndToEndBreakpointTest(unittest.TestCase):
         # The harness sets up the breakpoint wrapper directly (same code as 'b' command generates)
         self._start_lua_harness("dynamic_breakpoint")
 
+        handle_command("break MyGlobalFunction")
+
         # Wait for breakpoint to be hit when Lua calls MyGlobalFunction(10, 20)
         thread_id = self._wait_for_breakpoint()
         self.assertIsNotNone(thread_id)
