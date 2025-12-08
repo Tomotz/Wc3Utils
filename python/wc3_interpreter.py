@@ -393,10 +393,9 @@ def parse_nonloadable_file(filename: str) -> Optional[bytes]:
 
     # Parse the preload wrapper and extract payload from call Preload( "..." ) lines
     # Pattern matches: call Preload( "..." ) and allows double quotes inside the payload
-    # The pattern ((?:""|[^"])*) matches either doubled quotes "" or non-quote chars,
     # stopping only at the closing " ) sequence
-    pattern = rb'call Preload\( "((?:""|[^"])*)" \)'
-    matches = re.findall(pattern, content)
+    pattern = rb'call Preload\( "(.+?)" \)'
+    matches = re.findall(pattern, content, flags=re.DOTALL)
     if matches:
         return b''.join(matches)
 
@@ -784,6 +783,7 @@ def handle_command(cmd: str) -> bool:
         print("  continue/c - resume execution of current breakpoint thread")
         print("  enable/e <breakpoint_id> - enable a breakpoint by its ID")
         print("  disable/d <breakpoint_id> - disable a breakpoint by its ID")
+        print("  b/break <function_name> - set a dynamic breakpoint on a global function. When the function is called, execution will pause and you can inspect/modify arguments")
         print("  <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.")
         print("** Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **")
         print("** Note: OnInit calls in files sent via 'file' or 'watch' are automatically executed immediately **")
@@ -863,6 +863,37 @@ def handle_command(cmd: str) -> bool:
         lua_cmd = f'EnabledBreakpoints["{args}"] = false'
         send_data_to_game(lua_cmd)
         print(f"Disabled breakpoint '{args}'")
+        return True
+    if main_cmd == "b" or main_cmd == "break":
+        if not args:
+            print("Usage: b/break <global_function_name>")
+            return True
+        func_name = args.strip()
+        bp_id = f"bp:{func_name}"
+        # Generate Lua code to wrap the global function with a breakpoint
+        # The wrapper:
+        # 1. Captures all arguments
+        # 2. Creates local variable pairs for Breakpoint()
+        # 3. Calls Breakpoint() which returns (potentially modified) values
+        # 4. Calls the original function with the modified arguments
+        lua_cmd = f'''do
+    local _orig_func = _G["{func_name}"]
+    if _orig_func == nil then
+        print("Error setting breakpoint: function '{func_name}' does not exist")
+        return
+    end
+    _G["{func_name}"] = function(...)
+        local args = {{...}}
+        local localVars = {{}}
+        for i, v in ipairs(args) do
+            table.insert(localVars, {{"arg" .. i, v}})
+        end
+        local modified = {{Breakpoint("{bp_id}", localVars)}}
+        return _orig_func(table.unpack(modified))
+    end
+end'''
+        send_data_to_game(lua_cmd)
+        print(f"Set breakpoint on function '{func_name}' (id: {bp_id})")
         return True
 
     # Send Lua command to game via unified interface
