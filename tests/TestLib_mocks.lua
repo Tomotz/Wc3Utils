@@ -686,6 +686,218 @@ function FourCC(code)
 end
 
 -- ============================================================================
+-- WC3 String Functions
+-- ============================================================================
+
+---@param s string
+---@return integer
+function StringLength(s)
+    return #s
+end
+
+---@param s string
+---@param start integer
+---@param finish integer
+---@return string
+function SubString(s, start, finish)
+    return s:sub(start + 1, finish)
+end
+
+---@param s string
+---@param upper boolean
+---@return string
+function StringCase(s, upper)
+    if upper then
+        return s:upper()
+    else
+        return s:lower()
+    end
+end
+
+-- ============================================================================
+-- Modulo Function
+-- ============================================================================
+
+---@param a integer
+---@param b integer
+---@return integer
+function ModuloInteger(a, b)
+    return a % b
+end
+
+-- ============================================================================
+-- Display Functions (no-op in standalone)
+-- ============================================================================
+
+---@param x number
+---@param y number
+---@param duration number
+---@param message string
+function DisplayTimedTextToLocalPlayer(x, y, duration, message)
+    -- No-op in standalone mode
+end
+
+---@param p any
+---@param x number
+---@param y number
+---@param duration number
+---@param message string
+function DisplayTimedTextToPlayer(p, x, y, duration, message)
+    -- No-op in standalone mode
+end
+
+-- ============================================================================
+-- Utility Functions
+-- ============================================================================
+
+---@param val any
+---@return boolean
+function is_zero_or_nil(val)
+    return val == nil or val == 0
+end
+
+---@param defaultValue any
+---@return table
+function __jarray(defaultValue)
+    return setmetatable({}, {
+        __index = function(t, k)
+            return defaultValue
+        end
+    })
+end
+
+-- ============================================================================
+-- WC3 JASS PRNG (exact implementation matching Warcraft 3's random number generator)
+-- Based on PyJASSPrng by huntergregal
+-- ============================================================================
+
+-- Constants extracted from game.dll v1.26.0.6401
+local JASS_CONSTANTS = {
+    0x8e, 0x14, 0x27, 0x99, 0xfd, 0xaa, 0xc7, 0x08, 0xd5, 0xe6, 0x3e, 0x1f, 0xf6, 0xbb, 0x55, 0xda,
+    0x75, 0xa0, 0x4a, 0x6a, 0xe8, 0xbd, 0x97, 0xff, 0xde, 0x9b, 0xbc, 0x9f, 0x81, 0x8a, 0xa1, 0x46,
+    0x6e, 0x0b, 0xe3, 0x63, 0x76, 0x7a, 0x6c, 0x5d, 0x88, 0xd3, 0x69, 0xca, 0xc3, 0x47, 0xb9, 0x25,
+    0x83, 0xab, 0xa2, 0x3f, 0xa6, 0x41, 0x7c, 0xba, 0xe5, 0xac, 0x95, 0x01, 0x7e, 0xcf, 0x09, 0xc1,
+    0xd9, 0x62, 0x70, 0x71, 0x8d, 0xdb, 0x05, 0x02, 0x24, 0x87, 0xef, 0x54, 0xc6, 0xd4, 0x37, 0x30,
+    0xd0, 0x1b, 0xcb, 0x7b, 0xb8, 0xe4, 0xd8, 0xec, 0x49, 0xce, 0xad, 0xdc, 0x13, 0xa9, 0x94, 0xc4,
+    0x8f, 0x39, 0xae, 0x0d, 0x18, 0x52, 0xdd, 0x0e, 0x78, 0xfa, 0xf5, 0x85, 0x58, 0xd2, 0xaf, 0x6d,
+    0xa4, 0xb2, 0x53, 0x3b, 0x51, 0xa5, 0x50, 0xbe, 0xfc, 0x2d, 0xf4, 0x11, 0x48, 0x98, 0x16, 0xf1,
+    0x86, 0xdf, 0x3d, 0x66, 0x5e, 0x44, 0x2e, 0x2f, 0x36, 0x07, 0x6b, 0x17, 0x8b, 0x29, 0x4c, 0xb6,
+    0xe2, 0x89, 0x5f, 0xe7, 0xcd, 0xa7, 0x21, 0xe1, 0x4d, 0xc9, 0x65, 0xed, 0xfe, 0xee, 0x9c, 0x23,
+    0x33, 0x7d, 0xb7, 0x04, 0x9e, 0x9a, 0x2a, 0x40, 0xb3, 0x10, 0x5b, 0xf3, 0x82, 0x77, 0x1c, 0x92,
+    0x20, 0x4e, 0x1e, 0x57, 0x22, 0x72, 0x06, 0x8c, 0x67, 0x2c, 0x73, 0xfb, 0x59, 0xc2, 0x0a, 0xbf,
+    0x79, 0x5c, 0xf9, 0x0c, 0x28, 0x1a, 0x12, 0x68, 0x74, 0x34, 0x19, 0x42, 0xb1, 0xc0, 0x84, 0xf8,
+    0x38, 0xf0, 0x15, 0x9d, 0x60, 0xf2, 0x3a, 0x6f, 0xb4, 0x90, 0xeb, 0x91, 0x1d, 0x7f, 0x35, 0x61,
+    0x5a, 0x32, 0x03, 0x56, 0xa3, 0xc5, 0x2b, 0x93, 0x80, 0x0f, 0x4b, 0x43, 0xf7, 0xa8, 0xe0, 0x3c,
+    0x96, 0xd1, 0x64, 0x26, 0xd7, 0x45, 0xcc, 0x4f, 0xc8, 0xb0, 0xe9, 0xb5, 0x00, 0xd6, 0x31, 0xea,
+    0x68, 0x75, 0x6e, 0x74, 0x65, 0x72, 0x20, 0x67, 0x72, 0x65, 0x67, 0x61, 0x6c,
+}
+
+-- JASS PRNG state
+local jass_seed_bits = 0
+local jass_current = 0
+
+-- 32-bit left rotation
+local function rotl32(x, n)
+    x = x & 0xffffffff
+    return ((x << n) | (x >> (32 - n))) & 0xffffffff
+end
+
+-- Get 4-byte little-endian integer from constants at 0-based index
+local function const_at(idx)
+    -- idx is 0-based like in Python, Lua tables are 1-based
+    local b0 = JASS_CONSTANTS[idx + 1] or 0
+    local b1 = JASS_CONSTANTS[idx + 2] or 0
+    local b2 = JASS_CONSTANTS[idx + 3] or 0
+    local b3 = JASS_CONSTANTS[idx + 4] or 0
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & 0xffffffff
+end
+
+-- Advance the PRNG state and return the next value
+local function jass_step()
+    local s = jass_seed_bits & 0xffffffff
+
+    local b3 = (s >> 24) & 0xff
+    local b2 = (s >> 16) & 0xff
+    local b1 = (s >> 8) & 0xff
+    local b0 = s & 0xff
+
+    local i0 = b3 - 4
+    if i0 < 0 then i0 = b3 + 0xB8 end
+    local i1 = b2 - 0x0C
+    if i1 < 0 then i1 = b2 + 200 end
+    local i2 = b1 - 0x18
+    if i2 < 0 then i2 = b1 + 0xD4 end
+    local i3 = b0 - 0x1C
+    if i3 < 0 then i3 = b0 + 0xD8 end
+
+    local mix = (
+        rotl32(const_at(i2), 3) ~
+        rotl32(const_at(i1), 2) ~
+        const_at(i3) ~
+        rotl32(const_at(i0), 1)
+    ) & 0xffffffff
+
+    local new_val = (jass_current + mix) & 0xffffffff
+
+    -- Advance seed bytes
+    jass_seed_bits = (((i0 & 0xff) << 24) |
+                      ((i1 & 0xff) << 16) |
+                      ((i2 & 0xff) << 8) |
+                      (i3 & 0xff)) & 0xffffffff
+
+    jass_current = new_val
+    return new_val
+end
+
+---Set the random seed (WC3 JASS compatible)
+---@param seed integer
+function SetRandomSeed(seed)
+    seed = seed & 0xffffffff
+
+    -- _set_seed: compute seed_bits from seed
+    -- seed_bitfield format:
+    --   [31..26]  6b:  ((seed / 47) * 17 + seed)  & 0x3F
+    --   [25..24]  2b:  0 (gaps)
+    --   [23..18]  6b:  seed % 53
+    --   [17..16]  2b:  0
+    --   [15..10]  6b:  seed % 59
+    --   [9..8]    2b:  0
+    --   [7..2]    6b:  seed % 61
+    --   [1..0]    2b:  0
+    jass_seed_bits = ((seed % 0x3d) << 2)
+    jass_seed_bits = jass_seed_bits | ((seed % 0x3b) << 10)
+    jass_seed_bits = jass_seed_bits | ((seed % 0x35) << 18)
+    jass_seed_bits = jass_seed_bits | (((seed // 0x2f) * 0x11 + seed) << 26)
+    jass_seed_bits = jass_seed_bits & 0xffffffff
+    jass_current = seed & 0xffffffff
+
+    -- The Python code immediately advances once after setting seed
+    jass_step()
+end
+
+---Get a random integer in range [min, max] (WC3 JASS compatible)
+---@param min_val integer
+---@param max_val integer
+---@return integer
+function GetRandomInt(min_val, max_val)
+    if min_val == max_val then
+        return min_val
+    end
+
+    local rng
+    if max_val < min_val then
+        rng = min_val - max_val
+    else
+        rng = max_val - min_val
+    end
+
+    local rnd = jass_step() & 0xffffffff
+    -- (rnd * (rng + 1)) >> 32
+    local t = (rnd * (rng + 1)) >> 32
+    return min_val + t
+end
+
+-- ============================================================================
 -- Async Test Runner
 -- ============================================================================
 
