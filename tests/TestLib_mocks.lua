@@ -535,13 +535,24 @@ function Preloader(filename)
     end
 
     if content and #content > 0 then
-        local startMarker = "//!beginusercode\n"
-        local endMarker = "\n//!endusercode"
+        -- Use markers without newlines to handle both LF and CRLF line endings
+        local startMarker = "//!beginusercode"
+        local endMarker = "//!endusercode"
         local startPos = content:find(startMarker, 1, true)
         local endPos = content:find(endMarker, 1, true)
 
         if startPos and endPos then
-            local luaCode = content:sub(startPos + #startMarker, endPos - 1)
+            -- Skip past the marker and any following newline characters
+            local codeStart = startPos + #startMarker
+            while codeStart <= #content and (content:sub(codeStart, codeStart) == "\r" or content:sub(codeStart, codeStart) == "\n") do
+                codeStart = codeStart + 1
+            end
+            -- Find the actual end position (before any preceding newline characters)
+            local codeEnd = endPos - 1
+            while codeEnd >= codeStart and (content:sub(codeEnd, codeEnd) == "\r" or content:sub(codeEnd, codeEnd) == "\n") do
+                codeEnd = codeEnd - 1
+            end
+            local luaCode = content:sub(codeStart, codeEnd)
 
             local env = {
                 BlzSetAbilityTooltip = BlzSetAbilityTooltip,
