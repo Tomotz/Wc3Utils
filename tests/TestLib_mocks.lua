@@ -478,6 +478,27 @@ function PreloadGenClear()
     fileSystem._currentFile = {}
 end
 
+---Build a proper WC3 preload file from chunks
+---@param chunks string[] -- The chunks to wrap
+---@param endTime number -- The time value for PreloadEnd
+---@return string -- The full preload file content
+local function buildPreloadFileFromChunks(chunks, endTime)
+    local lines = {}
+    table.insert(lines, "function PreloadFiles takes nothing returns nothing")
+    table.insert(lines, "")
+    table.insert(lines, "\tcall PreloadStart()")
+    for _, chunk in ipairs(chunks) do
+        -- WC3's Preload native places the content directly inside the quotes
+        -- without escaping. The content may contain quotes that close the string
+        -- early, which is intentional for the loadable file format.
+        table.insert(lines, '\tcall Preload( "' .. chunk .. '" )')
+    end
+    table.insert(lines, string.format("\tcall PreloadEnd( %.1f )", endTime))
+    table.insert(lines, "")
+    table.insert(lines, "endfunction")
+    return table.concat(lines, "\n")
+end
+
 ---@param filename string
 function PreloadGenEnd(filename)
     if fileSystem._currentFile then
@@ -496,22 +517,12 @@ function PreloadGenEnd(filename)
 
         local content
         if isLoadable then
-            -- For loadable files, just concatenate the chunks as before
-            content = table.concat(chunks)
+            -- For loadable files, wrap in proper WC3 preload format
+            -- Use a higher endTime value that matches typical save files
+            content = buildPreloadFileFromChunks(chunks, 4500.2)
         else
             -- For nonloadable files, wrap in proper WC3 preload format
-            -- Format: function PreloadFiles takes nothing returns nothing\n\n\tcall PreloadStart()\n\tcall Preload( "..." )\n\tcall PreloadEnd( 0.0 )\n\nendfunction
-            local lines = {}
-            table.insert(lines, "function PreloadFiles takes nothing returns nothing")
-            table.insert(lines, "")
-            table.insert(lines, "\tcall PreloadStart()")
-            for _, chunk in ipairs(chunks) do
-                table.insert(lines, '\tcall Preload( "' .. chunk .. '" )')
-            end
-            table.insert(lines, "\tcall PreloadEnd( 0.0 )")
-            table.insert(lines, "")
-            table.insert(lines, "endfunction")
-            content = table.concat(lines, "\n")
+            content = buildPreloadFileFromChunks(chunks, 0.0)
         end
 
         fileSystem[filename] = content
