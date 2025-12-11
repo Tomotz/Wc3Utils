@@ -442,6 +442,17 @@ end
 ---@type string?
 MOCK_FILE_MIRROR_ROOT = MOCK_FILE_MIRROR_ROOT or nil
 
+-- Optional: Set this global to true to capture the last Preload content to a global variable.
+-- When enabled, the raw content (before wrapping) is stored in MOCK_PRELOAD_LAST_CONTENT.
+-- This is useful for tests that need to access the generated save code directly.
+---@type boolean?
+MOCK_PRELOAD_CAPTURE_ENABLED = MOCK_PRELOAD_CAPTURE_ENABLED or nil
+
+-- Stores the last content captured by Preload when MOCK_PRELOAD_CAPTURE_ENABLED is true.
+-- This contains the raw concatenated chunks before any wrapping.
+---@type string?
+MOCK_PRELOAD_LAST_CONTENT = nil
+
 ---@type table<string, string>
 local fileSystem = {}
 
@@ -465,6 +476,12 @@ function PreloadGenEnd(filename)
         -- Check if this is a loadable file by looking for the beginusercode marker in the first chunk
         if #chunks > 0 and chunks[1]:find("//!beginusercode", 1, true) then
             isLoadable = true
+        end
+
+        -- Capture raw content to global variable if enabled
+        -- This stores the concatenated chunks before any wrapping
+        if MOCK_PRELOAD_CAPTURE_ENABLED then
+            MOCK_PRELOAD_LAST_CONTENT = table.concat(chunks)
         end
 
         local content
