@@ -453,6 +453,16 @@ MOCK_PRELOAD_CAPTURE_ENABLED = MOCK_PRELOAD_CAPTURE_ENABLED or nil
 ---@type string?
 MOCK_PRELOAD_LAST_CONTENT = nil
 
+-- Optional: Set this global to true to capture the data passed to FileIO.Save.
+-- When enabled, the raw data (before FileIO wrapping) is stored in MOCK_FILEIO_SAVE_LAST_DATA.
+-- This is useful for tests that need to access the exact data passed to FileIO.Save.
+---@type boolean?
+MOCK_FILEIO_SAVE_CAPTURE_ENABLED = MOCK_FILEIO_SAVE_CAPTURE_ENABLED or nil
+
+-- Stores the last data captured by FileIO.Save when MOCK_FILEIO_SAVE_CAPTURE_ENABLED is true.
+---@type string?
+MOCK_FILEIO_SAVE_LAST_DATA = nil
+
 ---@type table<string, string>
 local fileSystem = {}
 
@@ -952,4 +962,23 @@ function runAsyncTest(testName, testFunc)
     clearRunningCoroutines()
 
     print("--- " .. testName .. " completed ---")
+end
+
+-- ============================================================================
+-- FileIO.Save Capture Hook
+-- ============================================================================
+
+---Install the FileIO.Save capture hook after FileIO is loaded.
+---This wraps FileIO.Save to capture the data passed to it when MOCK_FILEIO_SAVE_CAPTURE_ENABLED is true.
+---Call this function after requiring FileIO to enable the capture functionality.
+function installFileIOSaveCapture()
+    if FileIO and FileIO.Save then
+        local realFileIO_Save = FileIO.Save
+        FileIO.Save = function(filename, data, isLoadable)
+            if MOCK_FILEIO_SAVE_CAPTURE_ENABLED then
+                MOCK_FILEIO_SAVE_LAST_DATA = data
+            end
+            return realFileIO_Save(filename, data, isLoadable)
+        end
+    end
 end
