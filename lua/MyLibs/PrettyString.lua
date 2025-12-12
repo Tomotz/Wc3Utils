@@ -48,6 +48,8 @@ function PrettyString(arg)
         local id = GetObjectTypeId(arg)
         local name = initDone and GetObjectName(arg) or "" -- using GetObjectName during init can cause crashes
         return type .. ": " .. name .. "('" .. FourCC2Str(id) .. "')"
+    elseif type(arg) == "nil" then
+        return "nil"
     end
     return tostring(arg)
 end
