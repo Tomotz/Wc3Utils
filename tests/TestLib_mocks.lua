@@ -81,23 +81,53 @@ local onInitCallbacks = {
 ---@field trig fun(func:fun())
 ---@field final fun(func:fun())
 
+---Mock require function for OnInit callbacks
+---In DawnOfTheDead, OnInit.final("name", function(require) ...) passes a require function
+---that waits for dependencies. In our mock, we just use the global require.
+---@param moduleName string
+local function mockOnInitRequire(moduleName)
+    -- The DawnOfTheDead OnInit require just ensures dependencies are loaded
+    -- In our mock environment, we don't need to do anything special
+    -- The modules should already be loaded or will be loaded by executeOnInitCallbacks
+end
+
+---Helper to handle both OnInit.xxx(func) and OnInit.xxx("name", func) patterns
+---@param callbacks table
+---@return fun(nameOrFunc: string|fun(), func?: fun())
+local function makeOnInitHandler(callbacks)
+    return function(nameOrFunc, func)
+        if type(nameOrFunc) == "function" then
+            table.insert(callbacks, nameOrFunc)
+        elseif type(nameOrFunc) == "string" and type(func) == "function" then
+            table.insert(callbacks, func)
+        end
+    end
+end
+
 ---@type OnInitLib
 OnInit = setmetatable({
-    map = function(func) table.insert(onInitCallbacks.map, func) end,
-    global = function(func) table.insert(onInitCallbacks.global, func) end,
-    trig = function(func) table.insert(onInitCallbacks.trig, func) end,
-    final = function(func) table.insert(onInitCallbacks.final, func) end
+    map = makeOnInitHandler(onInitCallbacks.map),
+    global = makeOnInitHandler(onInitCallbacks.global),
+    trig = makeOnInitHandler(onInitCallbacks.trig),
+    final = makeOnInitHandler(onInitCallbacks.final)
 }, {
     -- Allow OnInit to be called directly as OnInit(func), which defaults to OnInit.final
-    __call = function(_, func) table.insert(onInitCallbacks.final, func) end
+    __call = function(_, nameOrFunc, func)
+        if type(nameOrFunc) == "function" then
+            table.insert(onInitCallbacks.final, nameOrFunc)
+        elseif type(nameOrFunc) == "string" and type(func) == "function" then
+            table.insert(onInitCallbacks.final, func)
+        end
+    end
 })
 
 ---Execute all registered OnInit callbacks in order
+---Passes mockOnInitRequire to callbacks that expect a require function
 function executeOnInitCallbacks()
-    for _, func in ipairs(onInitCallbacks.map) do func() end
-    for _, func in ipairs(onInitCallbacks.global) do func() end
-    for _, func in ipairs(onInitCallbacks.trig) do func() end
-    for _, func in ipairs(onInitCallbacks.final) do func() end
+    for _, func in ipairs(onInitCallbacks.map) do func(mockOnInitRequire) end
+    for _, func in ipairs(onInitCallbacks.global) do func(mockOnInitRequire) end
+    for _, func in ipairs(onInitCallbacks.trig) do func(mockOnInitRequire) end
+    for _, func in ipairs(onInitCallbacks.final) do func(mockOnInitRequire) end
 end
 
 -- ============================================================================
