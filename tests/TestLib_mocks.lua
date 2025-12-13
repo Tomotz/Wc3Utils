@@ -83,12 +83,12 @@ local onInitCallbacks = {
 
 ---Mock require function for OnInit callbacks
 ---In DawnOfTheDead, OnInit.final("name", function(require) ...) passes a require function
----that waits for dependencies. In our mock, we just use the global require.
+---that waits for dependencies. We delegate to the real require so dependencies load correctly.
 ---@param moduleName string
 local function mockOnInitRequire(moduleName)
-    -- The DawnOfTheDead OnInit require just ensures dependencies are loaded
-    -- In our mock environment, we don't need to do anything special
-    -- The modules should already be loaded or will be loaded by executeOnInitCallbacks
+    -- Delegate to the real require so dependencies are actually loaded
+    -- This relies on package.path being set correctly for the version being loaded
+    require(moduleName)
 end
 
 ---Helper to handle both OnInit.xxx(func) and OnInit.xxx("name", func) patterns
@@ -128,6 +128,17 @@ function executeOnInitCallbacks()
     for _, func in ipairs(onInitCallbacks.global) do func(mockOnInitRequire) end
     for _, func in ipairs(onInitCallbacks.trig) do func(mockOnInitRequire) end
     for _, func in ipairs(onInitCallbacks.final) do func(mockOnInitRequire) end
+end
+
+---Reset all OnInit callback queues
+---Call this before re-requiring modules to ensure only the newly registered callbacks are executed
+---Note: We clear the arrays in place rather than replacing them, because the OnInit handlers
+---close over the original arrays. Replacing would break the linkage.
+function resetOnInitCallbacks()
+    for i = #onInitCallbacks.map, 1, -1 do onInitCallbacks.map[i] = nil end
+    for i = #onInitCallbacks.global, 1, -1 do onInitCallbacks.global[i] = nil end
+    for i = #onInitCallbacks.trig, 1, -1 do onInitCallbacks.trig[i] = nil end
+    for i = #onInitCallbacks.final, 1, -1 do onInitCallbacks.final[i] = nil end
 end
 
 -- ============================================================================
