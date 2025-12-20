@@ -784,6 +784,7 @@ def handle_command(cmd: str) -> bool:
         print("  enable/e <breakpoint_id> - enable a breakpoint by its ID")
         print("  disable/d <breakpoint_id> - disable a breakpoint by its ID")
         print("  b/break <function_name> - set a dynamic breakpoint on a global function. When the function is called, execution will pause and you can inspect/modify arguments")
+        print("  bl <file>:<line> - set a line breakpoint at a specific line in a Lua file. The file will be modified and sent to the game with a breakpoint at that line")
         print("  <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.")
         print("** Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **")
         print("** Note: OnInit calls in files sent via 'file' or 'watch' are automatically executed immediately **")
@@ -894,6 +895,80 @@ def handle_command(cmd: str) -> bool:
 end'''
         send_data_to_game(lua_cmd)
         print(f"Set breakpoint on function '{func_name}' (id: {bp_id})")
+        return True
+    if main_cmd == "bl":
+        # Line-based breakpoint: bl <file>:<line> or bl <file> <line>
+        if not args:
+            print("Usage: bl <file>:<line> or bl <file> <line>")
+            return True
+        # Parse file:line or file line format
+        if ':' in args:
+            parts = args.rsplit(':', 1)
+            filepath = parts[0].strip()
+            try:
+                line_num = int(parts[1].strip())
+            except ValueError:
+                print(f"Error: Invalid line number '{parts[1]}'")
+                return True
+        else:
+            parts = args.split()
+            if len(parts) < 2:
+                print("Usage: bl <file>:<line> or bl <file> <line>")
+                return True
+            filepath = parts[0].strip()
+            try:
+                line_num = int(parts[1].strip())
+            except ValueError:
+                print(f"Error: Invalid line number '{parts[1]}'")
+                return True
+        
+        # Resolve relative paths
+        if not os.path.isabs(filepath):
+            filepath = os.path.abspath(filepath)
+        
+        if not os.path.exists(filepath):
+            print(f"Error: File does not exist: {filepath}")
+            return True
+        
+        # Read the file
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Find the function containing the specified line
+        result = find_lua_function(content, line_number=line_num)
+        if not result:
+            print(f"Error: Could not find a function containing line {line_num}")
+            return True
+        
+        start, end, func_body = result
+        
+        # Calculate the relative line number within the function
+        # First, find which line the function starts on
+        lines_before_func = content[:start].count('\n')
+        relative_line = line_num - lines_before_func - 1  # -1 because line numbers are 1-indexed
+        
+        # Create breakpoint ID
+        basename = os.path.basename(filepath)
+        bp_id = f"line:{basename}:{line_num}"
+        
+        # Inject the breakpoint call at the specified line
+        inject_str = f'Breakpoint("{bp_id}")'
+        new_content = inject_into_function(content, start, end, inject_str, after_line=relative_line)
+        
+        # Extract just the modified function to send to the game
+        # We need to find the function again in the new content since positions changed
+        new_result = find_lua_function(new_content, line_number=line_num)
+        if not new_result:
+            print(f"Error: Could not re-locate function after injection")
+            return True
+        
+        _, _, new_func_body = new_result
+        
+        # Send the modified function to the game
+        # Wrap with OnInit immediate wrapper to ensure it executes
+        lua_cmd = wrap_with_oninit_immediate(new_func_body)
+        send_data_to_game(lua_cmd)
+        print(f"Set line breakpoint at {basename}:{line_num} (id: {bp_id})")
         return True
 
     # Send Lua command to game via unified interface
