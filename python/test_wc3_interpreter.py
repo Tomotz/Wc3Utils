@@ -289,8 +289,9 @@ class TestModifyFunction(unittest.TestCase):
     print("hello")
 end"""
         }
-        new_content = modify_function(lua_files, func_name="hello", inject_str="    -- modified")
-        self.assertIn("-- modified", new_content)
+        new_func_body, target_file = modify_function(lua_files, func_name="hello", inject_str="    -- modified")
+        self.assertIn("-- modified", new_func_body)
+        self.assertEqual(target_file, "test.lua")
 
     def test_modify_function_in_specific_file(self):
         """Test modifying a function in a specific file."""
@@ -300,13 +301,14 @@ end"""
     print("hello")
 end"""
         }
-        new_content = modify_function(
+        new_func_body, target_file = modify_function(
             lua_files,
             func_name="hello",
             target_file="file2.lua",
             inject_str="    -- modified"
         )
-        self.assertIn("-- modified", new_content)
+        self.assertIn("-- modified", new_func_body)
+        self.assertEqual(target_file, "file2.lua")
 
     def test_modify_function_not_found(self):
         """Test that ValueError is raised when function is not found."""
@@ -665,8 +667,8 @@ end""")
         finally:
             os.unlink(temp_path)
 
-    def test_bl_command_parses_space_format(self):
-        """Test that bl command parses 'file line' format correctly."""
+    def test_bl_command_rejects_space_format(self):
+        """Test that bl command rejects 'file line' format (only colon format is supported)."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
             f.write("""function myFunc()
     local x = 1
@@ -675,23 +677,17 @@ end""")
             temp_path = f.name
 
         try:
-            sent_data = []
-
-            def mock_send_data_to_game(data, print_prompt_after=False):
-                sent_data.append(data)
-                return None
-
             output_lines = []
             def fake_print(*args, **kwargs):
                 output_lines.append(' '.join(str(a) for a in args))
 
-            with patch.object(wc3_interpreter, 'send_data_to_game', side_effect=mock_send_data_to_game), \
-                 patch('builtins.print', side_effect=fake_print):
+            with patch('builtins.print', side_effect=fake_print):
                 result = wc3_interpreter.handle_command(f"bl {temp_path} 2")
 
             self.assertTrue(result)
-            self.assertEqual(len(sent_data), 1)
-            self.assertIn('Breakpoint("line:', sent_data[0])
+            output = '\n'.join(output_lines)
+            # Space format should show usage error since colon is required
+            self.assertIn("Usage", output)
         finally:
             os.unlink(temp_path)
 
@@ -755,7 +751,8 @@ end""")
             self.assertTrue(result)
             output = '\n'.join(output_lines)
             self.assertIn("Error", output)
-            self.assertIn("Could not find a function", output)
+            # Error message comes from modify_function which says "Could not locate function boundaries"
+            self.assertIn("Could not locate function boundaries", output)
         finally:
             os.unlink(temp_path)
 
