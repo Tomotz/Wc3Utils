@@ -9,6 +9,7 @@ import signal
 import sys
 import threading
 from queue import Queue, Empty
+from collections import defaultdict
 from typing import Optional, Dict, List, Tuple
 
 # Optional watchdog import for file watching functionality
@@ -125,6 +126,11 @@ stdin_reader_stop_event: threading.Event = threading.Event()
 # Field separator for breakpoint data files (ASCII 31 = unit separator)
 FIELD_SEP = bytes([31])
 
+# Project path and file map for relative path resolution in bl command
+project_path: Optional[str] = None
+project_files: Dict[str, str] = {}  # Maps file content to full path
+project_file_map: Dict[str, List[str]] = {}  # Maps basename to list of full paths
+
 if WATCHDOG_AVAILABLE:
     class FileChangeHandler(FileSystemEventHandler):
         """Handler for file change events that pushes to a queue for main thread processing"""
@@ -222,14 +228,28 @@ file_watcher = FileWatcher()
 # Dynamic breakpoint related code:
 # ============================================================================
 
-def load_lua_directory(path: str) -> Dict[str, str]:
+def load_lua_directory(path: str, build_file_map: bool = False) -> Dict[str, str]:
+    """Load all Lua files from a directory.
+    
+    Args:
+        path: Directory path to scan for Lua files
+        build_file_map: If True, also populate the global project_file_map
+        
+    Returns:
+        Dict mapping full file paths to file contents
+    """
+    global project_file_map
     lua_files: Dict[str, str] = {}
+    if build_file_map:
+        project_file_map = defaultdict(list)
     for root, _, files in os.walk(path):
         for f in files:
             if f.endswith('.lua'):
                 full_path = os.path.join(root, f)
                 with open(full_path, 'r', encoding='utf-8') as file:
                     lua_files[full_path] = file.read()
+                if build_file_map:
+                    project_file_map[f].append(full_path)
     return lua_files
 
 def find_lua_function(content: str, func_name: str=None, line_number: int=None):
@@ -282,13 +302,26 @@ def inject_into_function(content: str, start: int, end: int, inject_str: str, af
     new_func = ''.join(func_lines)
     return content[:start] + new_func + content[end:]
 
-def modify_function(lua_files: dict[str,str], func_name: Optional[str] = None, target_file: str='', target_line: Optional[int]=None, inject_str: str=''):
+def modify_function(lua_files: dict[str,str], func_name: Optional[str] = None, target_file: str='', target_line: Optional[int]=None, inject_str: str='', after_line: Optional[int]=None) -> Tuple[str, str]:
+    """Modify a function by injecting code.
+    
+    Args:
+        lua_files: Dict mapping file paths to file contents
+        func_name: Name of function to find (optional if target_line is provided)
+        target_file: Specific file to search in (optional)
+        target_line: Line number to find function containing (optional)
+        inject_str: Code to inject
+        after_line: Line number within function to inject after (optional, defaults to after header)
+        
+    Returns:
+        Tuple of (modified_function_body, target_file_path)
+    """
     if target_file != '':
         content = lua_files[target_file]
     else:
         # Search for name across all files
         for f, c in lua_files.items():
-            if func_name in c:
+            if func_name and func_name in c:
                 target_file = f
                 content = c
                 break
@@ -300,8 +333,89 @@ def modify_function(lua_files: dict[str,str], func_name: Optional[str] = None, t
         raise ValueError("Could not locate function boundaries")
 
     start, end, _ = match
-    new_content = inject_into_function(content, start, end, inject_str)
-    return new_content
+    
+    # Calculate relative line if target_line is provided and after_line is not
+    if target_line is not None and after_line is None:
+        lines_before_func = content[:start].count('\n')
+        after_line = target_line - lines_before_func - 1
+    
+    new_content = inject_into_function(content, start, end, inject_str, after_line=after_line)
+    
+    # Extract the modified function body
+    new_match = find_lua_function(new_content, func_name=func_name, line_number=target_line)
+    if not new_match:
+        raise ValueError("Could not re-locate function after injection")
+    
+    _, _, new_func_body = new_match
+    return new_func_body, target_file
+
+
+def resolve_filepath(filepath: str) -> Optional[str]:
+    """Resolve a filepath using the project file map.
+    
+    If filepath is absolute and exists, returns it directly.
+    If filepath is relative, searches the project_file_map for matches.
+    
+    Args:
+        filepath: File path (absolute or relative)
+        
+    Returns:
+        Resolved absolute path, or None if not found or ambiguous
+    """
+    global project_path, project_file_map
+    
+    # If absolute path, just check if it exists
+    if os.path.isabs(filepath):
+        if os.path.exists(filepath):
+            return filepath
+        print(f"Error: File does not exist: {filepath}")
+        return None
+    
+    # If no project path set, we can't resolve relative paths
+    if project_path is None:
+        print("Error: No project path set. Use 'project <path>' to set the project directory first.")
+        return None
+    
+    # Get the basename to search in the file map
+    basename = os.path.basename(filepath)
+    
+    if basename not in project_file_map:
+        print(f"Error: File '{basename}' not found in project")
+        return None
+    
+    matches = project_file_map[basename]
+    
+    if len(matches) == 1:
+        # Only one match - check if the relative path matches
+        full_path = matches[0]
+        # Check if the relative path is a suffix of the full path
+        if full_path.endswith(filepath):
+            return full_path
+        # If basename matches but path doesn't, still return it (user just used basename)
+        return full_path
+    
+    # Multiple matches - try to find one that matches the full relative path
+    matching_paths = []
+    for full_path in matches:
+        if full_path.endswith(filepath):
+            matching_paths.append(full_path)
+    
+    if len(matching_paths) == 1:
+        return matching_paths[0]
+    elif len(matching_paths) == 0:
+        # No match found - show all files with the same basename
+        print(f"Error: No file matches path '{filepath}'. Found {len(matches)} files named '{basename}':")
+        for p in matches:
+            print(f"  {p}")
+        print("Please provide a correct relative path.")
+        return None
+    else:
+        # Multiple matches even with path - ambiguous
+        print(f"Error: Ambiguous file '{filepath}'. Found {len(matching_paths)} matching files:")
+        for p in matching_paths:
+            print(f"  {p}")
+        print("Please provide more of the path to disambiguate.")
+        return None
 
 
 # ============================================================================
@@ -784,6 +898,8 @@ def handle_command(cmd: str) -> bool:
         print("  enable/e <breakpoint_id> - enable a breakpoint by its ID")
         print("  disable/d <breakpoint_id> - disable a breakpoint by its ID")
         print("  b/break <function_name> - set a dynamic breakpoint on a global function. When the function is called, execution will pause and you can inspect/modify arguments")
+        print("  project <path> - set the project directory for relative path resolution in bl command")
+        print("  bl <file>:<line> - set a line breakpoint at a specific line in a Lua file. Use absolute path or relative path (requires project to be set first)")
         print("  <lua command> - run a lua command in the game. If the command is a `return` statement, the result will be printed to the console.")
         print("** Note: exiting or restarting the script while the game is running will cause it to stop working until the game is also restarted **")
         print("** Note: OnInit calls in files sent via 'file' or 'watch' are automatically executed immediately **")
@@ -894,6 +1010,70 @@ def handle_command(cmd: str) -> bool:
 end'''
         send_data_to_game(lua_cmd)
         print(f"Set breakpoint on function '{func_name}' (id: {bp_id})")
+        return True
+    if main_cmd == "project":
+        global project_path, project_files
+        if not args:
+            if project_path:
+                print(f"Current project path: {project_path}")
+                print(f"Loaded {len(project_files)} Lua files")
+            else:
+                print("No project path set. Usage: project <path>")
+            return True
+        path = args.strip()
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            print(f"Error: Directory does not exist: {path}")
+            return True
+        project_path = path
+        project_files = load_lua_directory(path, build_file_map=True)
+        print(f"Project path set to: {project_path}")
+        print(f"Loaded {len(project_files)} Lua files")
+        return True
+    if main_cmd == "bl":
+        # Line-based breakpoint: bl <file>:<line>
+        if not args:
+            print("Usage: bl <file>:<line>")
+            return True
+        # Parse file:line format (colon is required)
+        if ':' not in args:
+            print("Usage: bl <file>:<line>")
+            return True
+        parts = args.rsplit(':', 1)
+        filepath = parts[0].strip()
+        try:
+            line_num = int(parts[1].strip())
+        except ValueError:
+            print(f"Error: Invalid line number '{parts[1]}'")
+            return True
+        
+        # Resolve filepath using project file map
+        resolved_path = resolve_filepath(filepath)
+        if resolved_path is None:
+            return True
+        
+        # Read the file and create a single-file dict for modify_function
+        with open(resolved_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        lua_files = {resolved_path: content}
+        
+        # Create breakpoint ID
+        basename = os.path.basename(resolved_path)
+        bp_id = f"line:{basename}:{line_num}"
+        
+        # Use modify_function to inject the breakpoint
+        inject_str = f'Breakpoint("{bp_id}")'
+        try:
+            new_func_body, _ = modify_function(lua_files, target_file=resolved_path, target_line=line_num, inject_str=inject_str)
+        except ValueError as e:
+            print(f"Error: {e}")
+            return True
+        
+        # Send the modified function to the game
+        lua_cmd = wrap_with_oninit_immediate(new_func_body)
+        send_data_to_game(lua_cmd)
+        print(f"Set line breakpoint at {basename}:{line_num} (id: {bp_id})")
         return True
 
     # Send Lua command to game via unified interface

@@ -289,8 +289,9 @@ class TestModifyFunction(unittest.TestCase):
     print("hello")
 end"""
         }
-        new_content = modify_function(lua_files, func_name="hello", inject_str="    -- modified")
-        self.assertIn("-- modified", new_content)
+        new_func_body, target_file = modify_function(lua_files, func_name="hello", inject_str="    -- modified")
+        self.assertIn("-- modified", new_func_body)
+        self.assertEqual(target_file, "test.lua")
 
     def test_modify_function_in_specific_file(self):
         """Test modifying a function in a specific file."""
@@ -300,13 +301,14 @@ end"""
     print("hello")
 end"""
         }
-        new_content = modify_function(
+        new_func_body, target_file = modify_function(
             lua_files,
             func_name="hello",
             target_file="file2.lua",
             inject_str="    -- modified"
         )
-        self.assertIn("-- modified", new_content)
+        self.assertIn("-- modified", new_func_body)
+        self.assertEqual(target_file, "file2.lua")
 
     def test_modify_function_not_found(self):
         """Test that ValueError is raised when function is not found."""
@@ -624,6 +626,149 @@ class TestFileCommand(unittest.TestCase):
             self.assertEqual(sent_files[0], temp_path)
         finally:
             os.unlink(temp_path)
+
+
+class TestLineBreakpointCommand(unittest.TestCase):
+    """Tests for the 'bl' (line breakpoint) command."""
+
+    def test_bl_command_parses_colon_format(self):
+        """Test that bl command parses file:line format correctly."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
+            f.write("""function myFunc()
+    local x = 1
+    local y = 2
+    return x + y
+end""")
+            temp_path = f.name
+
+        try:
+            sent_data = []
+
+            def mock_send_data_to_game(data, print_prompt_after=False):
+                sent_data.append(data)
+                return None
+
+            output_lines = []
+            def fake_print(*args, **kwargs):
+                output_lines.append(' '.join(str(a) for a in args))
+
+            with patch.object(wc3_interpreter, 'send_data_to_game', side_effect=mock_send_data_to_game), \
+                 patch('builtins.print', side_effect=fake_print):
+                result = wc3_interpreter.handle_command(f"bl {temp_path}:3")
+
+            self.assertTrue(result)
+            # Check that data was sent to game
+            self.assertEqual(len(sent_data), 1)
+            # Check that the breakpoint call was injected
+            self.assertIn('Breakpoint("line:', sent_data[0])
+            # Check success message
+            output = '\n'.join(output_lines)
+            self.assertIn("Set line breakpoint", output)
+        finally:
+            os.unlink(temp_path)
+
+    def test_bl_command_rejects_space_format(self):
+        """Test that bl command rejects 'file line' format (only colon format is supported)."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
+            f.write("""function myFunc()
+    local x = 1
+    return x
+end""")
+            temp_path = f.name
+
+        try:
+            output_lines = []
+            def fake_print(*args, **kwargs):
+                output_lines.append(' '.join(str(a) for a in args))
+
+            with patch('builtins.print', side_effect=fake_print):
+                result = wc3_interpreter.handle_command(f"bl {temp_path} 2")
+
+            self.assertTrue(result)
+            output = '\n'.join(output_lines)
+            # Space format should show usage error since colon is required
+            self.assertIn("Usage", output)
+        finally:
+            os.unlink(temp_path)
+
+    def test_bl_command_nonexistent_file(self):
+        """Test that bl command handles non-existent files gracefully."""
+        output_lines = []
+
+        def fake_print(*args, **kwargs):
+            output_lines.append(' '.join(str(a) for a in args))
+
+        with patch('builtins.print', side_effect=fake_print):
+            result = wc3_interpreter.handle_command("bl /nonexistent/file.lua:10")
+
+        self.assertTrue(result)
+        output = '\n'.join(output_lines)
+        self.assertIn("Error", output)
+        self.assertIn("does not exist", output)
+
+    def test_bl_command_invalid_line_number(self):
+        """Test that bl command handles invalid line numbers gracefully."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
+            f.write("function myFunc() end")
+            temp_path = f.name
+
+        try:
+            output_lines = []
+
+            def fake_print(*args, **kwargs):
+                output_lines.append(' '.join(str(a) for a in args))
+
+            with patch('builtins.print', side_effect=fake_print):
+                result = wc3_interpreter.handle_command(f"bl {temp_path}:abc")
+
+            self.assertTrue(result)
+            output = '\n'.join(output_lines)
+            self.assertIn("Error", output)
+            self.assertIn("Invalid line number", output)
+        finally:
+            os.unlink(temp_path)
+
+    def test_bl_command_line_outside_function(self):
+        """Test that bl command handles lines outside functions gracefully."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
+            f.write("""-- This is a comment
+local x = 1
+function myFunc()
+    return x
+end""")
+            temp_path = f.name
+
+        try:
+            output_lines = []
+
+            def fake_print(*args, **kwargs):
+                output_lines.append(' '.join(str(a) for a in args))
+
+            with patch('builtins.print', side_effect=fake_print):
+                # Line 2 is outside any function
+                result = wc3_interpreter.handle_command(f"bl {temp_path}:2")
+
+            self.assertTrue(result)
+            output = '\n'.join(output_lines)
+            self.assertIn("Error", output)
+            # Error message comes from modify_function which says "Could not locate function boundaries"
+            self.assertIn("Could not locate function boundaries", output)
+        finally:
+            os.unlink(temp_path)
+
+    def test_bl_command_no_args(self):
+        """Test that bl command shows usage when no args provided."""
+        output_lines = []
+
+        def fake_print(*args, **kwargs):
+            output_lines.append(' '.join(str(a) for a in args))
+
+        with patch('builtins.print', side_effect=fake_print):
+            result = wc3_interpreter.handle_command("bl")
+
+        self.assertTrue(result)
+        output = '\n'.join(output_lines)
+        self.assertIn("Usage", output)
 
 
 if __name__ == '__main__':
