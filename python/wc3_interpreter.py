@@ -9,6 +9,7 @@ import signal
 import sys
 import threading
 from queue import Queue, Empty
+from collections import defaultdict
 from typing import Optional, Dict, List, Tuple
 
 # Optional watchdog import for file watching functionality
@@ -240,7 +241,7 @@ def load_lua_directory(path: str, build_file_map: bool = False) -> Dict[str, str
     global project_file_map
     lua_files: Dict[str, str] = {}
     if build_file_map:
-        project_file_map = {}
+        project_file_map = defaultdict(list)
     for root, _, files in os.walk(path):
         for f in files:
             if f.endswith('.lua'):
@@ -248,8 +249,6 @@ def load_lua_directory(path: str, build_file_map: bool = False) -> Dict[str, str
                 with open(full_path, 'r', encoding='utf-8') as file:
                     lua_files[full_path] = file.read()
                 if build_file_map:
-                    if f not in project_file_map:
-                        project_file_map[f] = []
                     project_file_map[f].append(full_path)
     return lua_files
 
@@ -390,7 +389,7 @@ def resolve_filepath(filepath: str) -> Optional[str]:
         # Only one match - check if the relative path matches
         full_path = matches[0]
         # Check if the relative path is a suffix of the full path
-        if full_path.endswith(filepath) or full_path.endswith(os.sep + filepath):
+        if full_path.endswith(filepath):
             return full_path
         # If basename matches but path doesn't, still return it (user just used basename)
         return full_path
@@ -398,20 +397,20 @@ def resolve_filepath(filepath: str) -> Optional[str]:
     # Multiple matches - try to find one that matches the full relative path
     matching_paths = []
     for full_path in matches:
-        if full_path.endswith(filepath) or full_path.endswith(os.sep + filepath):
+        if full_path.endswith(filepath):
             matching_paths.append(full_path)
     
     if len(matching_paths) == 1:
         return matching_paths[0]
     elif len(matching_paths) == 0:
-        # No exact match, show all possibilities
-        print(f"Error: Ambiguous file '{filepath}'. Found {len(matches)} files with same name:")
+        # No match found - show all files with the same basename
+        print(f"Error: No file matches path '{filepath}'. Found {len(matches)} files named '{basename}':")
         for p in matches:
             print(f"  {p}")
-        print("Please provide more of the path to disambiguate.")
+        print("Please provide a correct relative path.")
         return None
     else:
-        # Multiple matches even with path
+        # Multiple matches even with path - ambiguous
         print(f"Error: Ambiguous file '{filepath}'. Found {len(matching_paths)} matching files:")
         for p in matching_paths:
             print(f"  {p}")
