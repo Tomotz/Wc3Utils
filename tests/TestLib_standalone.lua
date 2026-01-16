@@ -241,68 +241,6 @@ function test_StateSaver_FourCC2Str()
     print("FourCC2Str test passed!")
 end
 
-function test_StateSaver_SaveState()
-    print("Testing StateSaver.SaveState API...")
-    
-    StateSaverTestVar1 = "save state test value"
-    StateSaverTestVar2 = {key1 = 100, key2 = "nested value"}
-    StateSaverTestVar3 = 999
-    
-    StateSaver.RecordVariable("StateSaverTestVar1")
-    StateSaver.RecordVariable("StateSaverTestVar2")
-    StateSaver.RecordVariable("StateSaverTestVar3")
-    
-    local testUnit = CreateUnit(Player(0), FourCC("hfoo"), 500, 600, 180)
-    BlzSetUnitMaxHP(testUnit, 1000)
-    SetUnitState(testUnit, UNIT_STATE_LIFE, 750)
-    OnUnitCreated(testUnit)
-    
-    SetPlayerState(Player(0), PLAYER_STATE_RESOURCE_GOLD, 1500)
-    SetPlayerState(Player(0), PLAYER_STATE_RESOURCE_LUMBER, 800)
-    
-    StateSaver.SaveState("test_save_state", 1)
-    
-    print("StateSaver.SaveState API test passed!")
-end
-
-function test_StateSaver_SaveLoadRoundtrip()
-    print("Testing StateSaver save/load roundtrip...")
-    
-    RoundtripTestVar = "roundtrip test"
-    StateSaver.RecordVariable("RoundtripTestVar")
-    
-    local originalValue = RoundtripTestVar
-    
-    StateSaver.SaveState("roundtrip_test", 2)
-    
-    RoundtripTestVar = "modified after save"
-    Debug.assert(RoundtripTestVar ~= originalValue, "Variable should be modified after save")
-    
-    print("StateSaver save/load roundtrip test passed!")
-end
-
-function test_StateSaver_LoadStateFiles()
-    print("Testing StateSaver.LoadStateFiles API...")
-    
-    LoadTestVar = "load test value"
-    StateSaver.RecordVariable("LoadTestVar")
-    
-    StateSaver.SaveState("load_test_file", 3)
-    
-    print("StateSaver.LoadStateFiles API test passed!")
-end
-
-function test_StateSaver_LoadState()
-    print("Testing StateSaver.LoadState API...")
-    
-    LoadStateTestVar = "load state test"
-    StateSaver.RecordVariable("LoadStateTestVar")
-    
-    StateSaver.SaveState("load_state_test", 4)
-    
-    print("StateSaver.LoadState API test passed!")
-end
-
 function test_StateSaver_FullRoundtrip()
     print("Testing StateSaver full save/load roundtrip...")
     
@@ -380,10 +318,6 @@ test_StateSaver_ItemMocks()
 test_StateSaver_HeroMocks()
 test_StateSaver_PlayerStateMocks()
 test_StateSaver_FourCC2Str()
-test_StateSaver_SaveState()
-test_StateSaver_SaveLoadRoundtrip()
-test_StateSaver_LoadStateFiles()
-test_StateSaver_LoadState()
 
 runAsyncTest("test_StateSaver_FullRoundtrip", test_StateSaver_FullRoundtrip)
 
