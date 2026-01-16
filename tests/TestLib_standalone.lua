@@ -241,6 +241,137 @@ function test_StateSaver_FourCC2Str()
     print("FourCC2Str test passed!")
 end
 
+function test_StateSaver_SaveState()
+    print("Testing StateSaver.SaveState API...")
+    
+    StateSaverTestVar1 = "save state test value"
+    StateSaverTestVar2 = {key1 = 100, key2 = "nested value"}
+    StateSaverTestVar3 = 999
+    
+    StateSaver.RecordVariable("StateSaverTestVar1")
+    StateSaver.RecordVariable("StateSaverTestVar2")
+    StateSaver.RecordVariable("StateSaverTestVar3")
+    
+    local testUnit = CreateUnit(Player(0), FourCC("hfoo"), 500, 600, 180)
+    BlzSetUnitMaxHP(testUnit, 1000)
+    SetUnitState(testUnit, UNIT_STATE_LIFE, 750)
+    OnUnitCreated(testUnit)
+    
+    SetPlayerState(Player(0), PLAYER_STATE_RESOURCE_GOLD, 1500)
+    SetPlayerState(Player(0), PLAYER_STATE_RESOURCE_LUMBER, 800)
+    
+    StateSaver.SaveState("test_save_state", 1)
+    
+    print("StateSaver.SaveState API test passed!")
+end
+
+function test_StateSaver_SaveLoadRoundtrip()
+    print("Testing StateSaver save/load roundtrip...")
+    
+    RoundtripTestVar = "roundtrip test"
+    StateSaver.RecordVariable("RoundtripTestVar")
+    
+    local originalValue = RoundtripTestVar
+    
+    StateSaver.SaveState("roundtrip_test", 2)
+    
+    RoundtripTestVar = "modified after save"
+    Debug.assert(RoundtripTestVar ~= originalValue, "Variable should be modified after save")
+    
+    print("StateSaver save/load roundtrip test passed!")
+end
+
+function test_StateSaver_LoadStateFiles()
+    print("Testing StateSaver.LoadStateFiles API...")
+    
+    LoadTestVar = "load test value"
+    StateSaver.RecordVariable("LoadTestVar")
+    
+    StateSaver.SaveState("load_test_file", 3)
+    
+    print("StateSaver.LoadStateFiles API test passed!")
+end
+
+function test_StateSaver_LoadState()
+    print("Testing StateSaver.LoadState API...")
+    
+    LoadStateTestVar = "load state test"
+    StateSaver.RecordVariable("LoadStateTestVar")
+    
+    StateSaver.SaveState("load_state_test", 4)
+    
+    print("StateSaver.LoadState API test passed!")
+end
+
+function test_StateSaver_FullRoundtrip()
+    print("Testing StateSaver full save/load roundtrip...")
+    
+    FullRoundtripVar1 = "original string value"
+    FullRoundtripVar2 = 42
+    FullRoundtripVar3 = {nested = {deep = "value"}, arr = {1, 2, 3}}
+    FullRoundtripVar4 = true
+    
+    StateSaver.RecordVariable("FullRoundtripVar1")
+    StateSaver.RecordVariable("FullRoundtripVar2")
+    StateSaver.RecordVariable("FullRoundtripVar3")
+    StateSaver.RecordVariable("FullRoundtripVar4")
+    
+    local originalVar1 = FullRoundtripVar1
+    local originalVar2 = FullRoundtripVar2
+    local originalVar3 = {nested = {deep = FullRoundtripVar3.nested.deep}, arr = {FullRoundtripVar3.arr[1], FullRoundtripVar3.arr[2], FullRoundtripVar3.arr[3]}}
+    local originalVar4 = FullRoundtripVar4
+    
+    local testUnit = CreateUnit(Player(0), FourCC("hfoo"), 100, 200, 90)
+    BlzSetUnitMaxHP(testUnit, 500)
+    SetUnitState(testUnit, UNIT_STATE_LIFE, 350)
+    OnUnitCreated(testUnit)
+    
+    SetPlayerState(Player(0), PLAYER_STATE_RESOURCE_GOLD, 1000)
+    SetPlayerState(Player(0), PLAYER_STATE_RESOURCE_LUMBER, 500)
+    
+    StateSaver.SaveState("full_roundtrip_test", 5)
+    
+    FullRoundtripVar1 = "modified"
+    FullRoundtripVar2 = 999
+    FullRoundtripVar3 = {}
+    FullRoundtripVar4 = false
+    SetPlayerState(Player(0), PLAYER_STATE_RESOURCE_GOLD, 0)
+    SetPlayerState(Player(0), PLAYER_STATE_RESOURCE_LUMBER, 0)
+    
+    Debug.assert(FullRoundtripVar1 ~= originalVar1, "Variable should be modified before load")
+    Debug.assert(FullRoundtripVar2 ~= originalVar2, "Variable should be modified before load")
+    Debug.assert(FullRoundtripVar4 ~= originalVar4, "Variable should be modified before load")
+    
+    local loadCompleted = false
+    StateSaver.LoadStateFiles(Player(0), {"full_roundtrip_test"})
+    
+    for _ = 1, 100 do
+        TriggerSleepAction(0.1)
+        if SaveStateDatas[1] ~= nil then
+            loadCompleted = true
+            break
+        end
+    end
+    
+    Debug.assert(loadCompleted, "LoadStateFiles should complete")
+    Debug.assert(SaveStateDatas[1] ~= nil, "SaveStateDatas[1] should be loaded")
+    
+    StateSaver.LoadState(1)
+    
+    Debug.assert(FullRoundtripVar1 == originalVar1, "FullRoundtripVar1 should be restored to: " .. originalVar1 .. ", got: " .. tostring(FullRoundtripVar1))
+    Debug.assert(FullRoundtripVar2 == originalVar2, "FullRoundtripVar2 should be restored to: " .. tostring(originalVar2) .. ", got: " .. tostring(FullRoundtripVar2))
+    Debug.assert(FullRoundtripVar4 == originalVar4, "FullRoundtripVar4 should be restored to: " .. tostring(originalVar4) .. ", got: " .. tostring(FullRoundtripVar4))
+    Debug.assert(FullRoundtripVar3.nested ~= nil, "FullRoundtripVar3.nested should exist")
+    Debug.assert(FullRoundtripVar3.nested.deep == originalVar3.nested.deep, "FullRoundtripVar3.nested.deep should be restored")
+    Debug.assert(FullRoundtripVar3.arr ~= nil, "FullRoundtripVar3.arr should exist")
+    Debug.assert(#FullRoundtripVar3.arr == 3, "FullRoundtripVar3.arr should have 3 elements")
+    
+    Debug.assert(GetPlayerState(Player(0), PLAYER_STATE_RESOURCE_GOLD) == 1000, "Player gold should be restored to 1000")
+    Debug.assert(GetPlayerState(Player(0), PLAYER_STATE_RESOURCE_LUMBER) == 500, "Player lumber should be restored to 500")
+    
+    print("StateSaver full save/load roundtrip test passed!")
+end
+
 test_StateSaver_RecordVariable()
 test_StateSaver_VariablePackUnpack()
 test_StateSaver_PlayerMapping()
@@ -249,6 +380,12 @@ test_StateSaver_ItemMocks()
 test_StateSaver_HeroMocks()
 test_StateSaver_PlayerStateMocks()
 test_StateSaver_FourCC2Str()
+test_StateSaver_SaveState()
+test_StateSaver_SaveLoadRoundtrip()
+test_StateSaver_LoadStateFiles()
+test_StateSaver_LoadState()
+
+runAsyncTest("test_StateSaver_FullRoundtrip", test_StateSaver_FullRoundtrip)
 
 print("\n============================================================")
 print("ALL TESTS PASSED!")
