@@ -65,7 +65,8 @@ Serializer = {}
 --[[----------------------------------------------------------------------------------------------------
                             CONFIGURATION                                                             ]]
 Serializer.VERSION = "000"
-Serializer.TEXT_PREFIX = Serializer.VERSION .. " Serializer "
+Serializer.PREFIX_END = " Serializer "
+Serializer.TEXT_PREFIX = Serializer.VERSION .. Serializer.PREFIX_END
 local IS_DEBUG = false -- enable debug prints
 
 --------------------------------------------------------------------------------------------------------
@@ -187,6 +188,7 @@ local delimiterList = {
     ["B"] = {type="const", value=false},
     ["D"] = {type="const", subType="int", num_characters=0, value=0},
     ["E"] = {type="const", subType="int", num_characters=0, value=1},
+    ["F"] = {type="const", subType="int", num_characters=0, value=nil},
 
     --- userdata types
     ["P"] = {type="unit", num_characters=4},
@@ -252,6 +254,7 @@ local delimiterMapping = {
     ["False"] = "B",
     ["zero"] = "D",
     ["one"] = "E",
+    ["nill"] = "F",
 
     ["unit"] = "P",
     ["item"] = "Q",
@@ -359,10 +362,10 @@ function packVariable(input, buffer, skipDelimiter)
             end
             return nil
         end
+    elseif input == nil or tostring(input) == "nil" then
+        delimiterType = delimiterMapping.nill
     else
-        if input ~= nil and tostring(input) ~= "nil" then
-            debugPrint(true, "unsupported type for saving: ", type(input), ". data: ", input, ". returning zero")
-        end
+        debugPrint(true, "unsupported type for saving: ", type(input), ". data: ", input, ". returning zero")
         delimiterType = delimiterMapping.zero
     end
 
@@ -609,15 +612,15 @@ function consumeBytes(data, in_ptr, numBytes)
 end
 
 ---@param data string -- the packed array
+---@param pos integer -- the current position in the data string
 ---@param count integer -- the number of elements in the array
 ---@param isSingleType boolean -- true if all array nodes are of the same type
 ---@return table? -- the loaded table or nil on error
----@return integer? -- number of characters consumed
-function loadArr(data, count, isSingleType)
-    local in_ptr = 1
+---@return integer? -- new position in the data string
+function loadArr(data, pos, count, isSingleType)
     local allValType = nil
     if isSingleType then
-        allValType, in_ptr = consumeBytes(data, in_ptr, 1)
+        allValType, pos = consumeBytes(data, pos, 1)
         if allValType == nil then
             return nil
         end
@@ -626,98 +629,99 @@ function loadArr(data, count, isSingleType)
     while count > 0 do
         local valueType = allValType
         if valueType == nil then
-            valueType, in_ptr = consumeBytes(data, in_ptr, 1)
+            valueType, pos = consumeBytes(data, pos, 1)
             if valueType == nil then
                 return nil
             end
         end
-        local success, tokenVal, numChars = loadToken(string.char(valueType), data:sub(in_ptr))
+        local success, tokenVal, newPos = loadTokenAtPos(data, pos, valueType)
         if not success then
             return nil
         end
-        in_ptr = in_ptr + numChars
-        local value = tokenVal
-        outTable[#outTable + 1] = value
+        pos = newPos
+        outTable[#outTable + 1] = tokenVal
 
         count = count - 1
     end
-    return outTable, in_ptr - 1
+    return outTable, pos
 end
 
 ---@param data string
+---@param pos integer -- the current position in the data string
 ---@param token tokenProperties
 ---@return table? -- the loaded table or nil on error
----@return integer? -- number of characters consumed
-function loadTable(data, token)
-    local in_ptr = 1
+---@return integer? -- new position in the data string
+function loadTable(data, pos, token)
     local nodeCount
-    if #data < 2 then
+    if pos + 1 > #data then
         debugPrint(true, "invalid data length! ", #data)
         return nil
     end
-    nodeCount, in_ptr = consumeBytes(data, in_ptr, 2)
+    nodeCount, pos = consumeBytes(data, pos, 2)
     if nodeCount == nil then
         return nil
     end
     if token.subType == "var_arr" or token.subType == "type_arr" then
         local isSingleType = token.subType == "type_arr"
-        local valTable, consumed = loadArr(data:sub(in_ptr), nodeCount, isSingleType)
+        local valTable, newPos = loadArr(data, pos, nodeCount, isSingleType)
         if valTable == nil then
             return nil
         end
-        return valTable, in_ptr + consumed - 1
+        return valTable, newPos
     end
     local isKeyTyped = token.subType == "var_val_tbl" or token.subType == "typed_tbl"
-    local keyTable, consumed = loadArr(data:sub(in_ptr), nodeCount, isKeyTyped)
+    local keyTable, newPos = loadArr(data, pos, nodeCount, isKeyTyped)
     if keyTable == nil then
         return nil
     end
-    in_ptr = in_ptr + consumed
+    pos = newPos
     local isValTyped = token.subType == "var_key_tbl" or token.subType == "typed_tbl"
-    local valTable, consumed0 = loadArr(data:sub(in_ptr), nodeCount, isValTyped)
+    local valTable, newPos2 = loadArr(data, pos, nodeCount, isValTyped)
     if valTable == nil then
         return nil
     end
-    in_ptr = in_ptr + consumed0
+    pos = newPos2
     local outTable = {}
     for i = 1, nodeCount do
         outTable[keyTable[i]] = valTable[i]
     end
-    return outTable, in_ptr - 1
+    return outTable, pos
 end
 
----Loads packed with packVariable data into a variable.
----@param delType string -- type of the token
----@param data string -- the packed token
+---Loads packed with packVariable data into a variable using position-based parsing.
+---This avoids creating substrings for each token, which was causing O(n^2) memory usage.
+---@param data string -- the full packed data string
+---@param pos integer -- the current position in the data string
+---@param delTypeByte integer -- the delimiter type as a byte value
 ---@return boolean -- isSuccess - returns false on fail
 ---@return any -- value of the loaded variable, or nil on input error
----@return integer? -- number of characters consumed
-function loadToken(delType, data)
+---@return integer? -- new position in the data string
+function loadTokenAtPos(data, pos, delTypeByte)
+    local delType = string.char(delTypeByte)
     if delimiterList[delType] == nil then
         debugPrint(true, "invalid delimiter! ", delType)
         return false -- bad format
     end
     if delimiterList[delType].type == "const" then
-        return true, delimiterList[delType].value, 0
+        return true, delimiterList[delType].value, pos
     end
     if delimiterList[delType].type == "tbl" then
-        local tbl, consumed = loadTable(data, delimiterList[delType])
+        local tbl, newPos = loadTable(data, pos, delimiterList[delType])
         if tbl == nil then
             return false
         end
-        return true, tbl, consumed
+        return true, tbl, newPos
     end
-    local in_ptr = 1
     -- If we didn't return by now, the token is a number or string
     local tokenLen = delimiterList[delType].num_characters
-    local tokenEnd = in_ptr + tokenLen - 1
+    local tokenEnd = pos + tokenLen - 1
     if tokenEnd > #data then
         debugPrint(true, "invalid token length!")
         return false -- bad format
     end
-    local tokenContent = data:sub(in_ptr, tokenEnd)
+    local tokenContent = data:sub(pos, tokenEnd)
     debugPrint(false, "consumed token. len=", tokenLen, ". first byte=: ", tostring(tokenContent):byte(1))
-    in_ptr = tokenEnd + 1
+    pos = tokenEnd + 1
     local value
     if delimiterList[delType].type == "num" then
         value = unpackBytes(tokenContent)
@@ -735,7 +739,7 @@ function loadToken(delType, data)
             return false -- bad format
         end
         value = data:sub(tokenEnd + 1, strEnd)
-        in_ptr = strEnd + 1
+        pos = strEnd + 1
     elseif delimiterList[delType].type == "unit" then
         value = UniqueIdToUnit[unpackBytes(tokenContent)]
         debugPrint(false, "loading unit token. UniqueId:", unpackBytes(tokenContent), ", unit:", value)
@@ -747,7 +751,22 @@ function loadToken(delType, data)
         end
     end
     debugPrint(false, "finished loading token: ", tostring(value):sub(1, 100))
-    return true, value, in_ptr - 1
+    return true, value, pos
+end
+
+---Loads packed with packVariable data into a variable.
+---Legacy wrapper for loadTokenAtPos that maintains backward compatibility.
+---@param delType string -- type of the token
+---@param data string -- the packed token
+---@return boolean -- isSuccess - returns false on fail
+---@return any -- value of the loaded variable, or nil on input error
+---@return integer? -- number of characters consumed
+function loadToken(delType, data)
+    local success, val, newPos = loadTokenAtPos(data, 1, string.byte(delType))
+    if not success then
+        return false
+    end
+    return true, val, newPos - 1
 end
 
 ---Loads data packed with dumpVariable into a variable.
@@ -759,13 +778,13 @@ function Serializer.loadVariable(data)
         debugPrint(true, "empty data!")
         return nil
     end
-    local delType = string.sub(data, 1, 1)
-    debugPrint(false, "consumed delimiter (1 byte): ", string.format("0x\x2502X", string.byte(delType)))
-    local success, val, numChars = loadToken(delType, data:sub(2))
+    local delTypeByte = string.byte(data, 1)
+    debugPrint(false, "consumed delimiter (1 byte): ", string.format("0x\x2502X", delTypeByte))
+    local success, val, newPos = loadTokenAtPos(data, 2, delTypeByte)
     if not success then
         return nil
     end
-    return val, numChars + 1
+    return val, newPos - 1
 end
 
 -- gets the packed and scrambled variable and returns the unpacked version of it
@@ -779,7 +798,7 @@ local function handleSyncData(packedData, isDeflate)
         decompressed = LibDeflate.DecompressDeflate(packedData)
         if decompressed == nil then
             debugPrint(true, "Failed to decompress data.")
-            print("loading error")
+            print("loading error. Failed to decompress data.")
             return nil
         end
         debugPrint(false, "deflate the second inflate:", decompressed:sub(1, 10), "end:", decompressed:sub(-10))
@@ -787,12 +806,12 @@ local function handleSyncData(packedData, isDeflate)
     local loaded = Serializer.loadVariable(decompressed)
     if loaded == nil then
         debugPrint(true, "Failed to load variable from data.")
-        print("loading error")
+        print("loading error. Failed to load variable from data.")
         return nil
     end
     if type(loaded) ~= "table" then
         debugPrint(true, "expected loaded data to be a table.", type(loaded))
-        print("loading error")
+        print("loading error. Expected loaded data to be a table.")
         return nil
     end
     return loaded
@@ -834,8 +853,15 @@ function Serializer.loadFile(whichPlayer, filePaths, callback, unscrambleCallbac
             scrambledData = ""
         else
             debugPrint(false, "After load file:", scrambledData:sub(1, 10), "end:", scrambledData:sub(-10))
-            scrambledData = scrambledData:sub(#Serializer.TEXT_PREFIX + 1, #scrambledData - 1) -- remove prefix and ending newline
-            debugPrint(false, "After prefix removal:", scrambledData:sub(1, 10), "end:", scrambledData:sub(-10))
+            -- remove prefix and ending newline. We don't want to force a format on the prefix, so we just crop until we see PREFIX_END
+            local prefixEndIndex = string.find(scrambledData, Serializer.PREFIX_END)
+            if not prefixEndIndex then
+                errorMsg = "Save file corrupted or unrecognised."
+                scrambledData = " "
+            else
+                scrambledData = scrambledData:sub(prefixEndIndex + #Serializer.PREFIX_END, #scrambledData - 1)
+                debugPrint(false, "After prefix:", scrambledData:sub(1, 10), "end:", scrambledData:sub(-10))
+            end
         end
         if whichPlayer ~= GetLocalPlayer() and errorMsg ~= "" then
             debugPrint(false, errorMsg)
