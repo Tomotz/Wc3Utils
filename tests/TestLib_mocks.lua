@@ -1305,6 +1305,29 @@ function CreateItem(itemTypeId, x, y)
     return item
 end
 
+MAP_CONTROL_USER = "MAP_CONTROL_USER"
+MAP_CONTROL_COMPUTER = "MAP_CONTROL_COMPUTER"
+PLAYER_SLOT_STATE_PLAYING = "PLAYER_SLOT_STATE_PLAYING"
+PLAYER_SLOT_STATE_EMPTY = "PLAYER_SLOT_STATE_EMPTY"
+
+---@param p player
+---@return mapcontrol
+function GetPlayerController(p)
+    if GetPlayerId(p) == 0 then
+        return MAP_CONTROL_USER
+    end
+    return MAP_CONTROL_COMPUTER
+end
+
+---@param p player
+---@return playerslotstate
+function GetPlayerSlotState(p)
+    if GetPlayerId(p) == 0 then
+        return PLAYER_SLOT_STATE_PLAYING
+    end
+    return PLAYER_SLOT_STATE_EMPTY
+end
+
 ---@param item item
 ---@return integer
 function GetItemTypeId(item)
