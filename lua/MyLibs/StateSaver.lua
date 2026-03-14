@@ -251,7 +251,7 @@ end)
 ---@param tbl string[]
 --- Fills the table with all the player names. Note that the index in the table is the player index + 1
 local function populatePlayerNames(tbl)
-    for i = 0, #wasActivePlayers do
+    for i = 1, #wasActivePlayers do
         local name = GetPlayerName(Player(wasActivePlayers[i])) or ""
         table.insert(tbl, name)
     end
