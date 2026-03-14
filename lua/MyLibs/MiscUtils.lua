@@ -189,6 +189,8 @@ OnInit.trig(function()
         ["-o"] = TestOrigSync,
         ["-f"] = FlushLog,
         ["-b"] = TestBreakpoints,
+        ["-save"] = SaveState,
+        ["-load"] = LoadState,
     }
 end)
 end --- Chat Command Handler

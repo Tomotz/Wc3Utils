@@ -125,6 +125,43 @@ function FlushLog()
     LogWrite("")
 end
 
+function SaveState(triggerPlayer, args)
+    local stateName = args[1] or "default"
+    StateSaver.SaveState(stateName)
+    print("State saved with name", stateName)
+end
+
+function LoadState(triggerPlayer, args)
+    local t = CreateTrigger()
+    local stateName = args[1] or "default"
+    TriggerAddAction(t, function()
+        --- Load state files can be ran at game start.
+        StateSaver.LoadStateFiles(triggerPlayer, {stateName})
+
+        print("Loading state files. This might take a few seconds")
+        --- wait for state data to finish loading
+        local count = 0
+        while next(SaveStateDatas) == nil do
+            if count == 600 then
+                LogWriteNoFlush("Error! state data didn't load in time. Aborting.")
+                return
+            end
+            TriggerSleepAction(0.1)
+        end
+
+        -- Before running loadState, you should clear any game data that is not needed
+        for u, data in pairs(AllUnitIds) do
+            RemoveUnit(u)
+        end
+
+        -- in the callback, you can run anything needed before unit skills and stats are loaded
+        StateSaver.LoadState(1, function() end)
+        print("State loaded with name", stateName)
+        LogWrite("State loaded with name", stateName)
+    end)
+    TriggerExecute(t)
+end
+
 function RegisterEvents()
     ExecutedTrigger = CreateTrigger()
     TriggerAddAction(ExecutedTrigger, ExecutedFunctionWithTSA)
@@ -138,6 +175,6 @@ function RegisterEvents()
     LogWrite("Testing log:", Mage, {a = 1.35, [3] = 2, c = {Mage, "string", math.pi}})
 end
 
-OnInit(RegisterEvents)
+OnInit.final(RegisterEvents)
 
 if Debug then Debug.endFile() end
