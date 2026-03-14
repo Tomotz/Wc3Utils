@@ -826,6 +826,705 @@ function DisplayTimedTextToPlayer(p, x, y, duration, message)
 end
 
 -- ============================================================================
+-- Unit System (for StateSaver tests)
+-- ============================================================================
+
+---@class unit
+---@field _id integer
+---@field _typeId integer
+---@field _owner player
+---@field _x number
+---@field _y number
+---@field _facing number
+---@field _flyHeight number
+---@field _maxHP integer
+---@field _curHP number
+---@field _maxMana integer
+---@field _curMana number
+---@field _baseDamage integer
+---@field _heroXP integer
+---@field _heroStr integer
+---@field _heroAgi integer
+---@field _heroInt integer
+---@field _heroProperName string?
+---@field _inventory table<integer, item>
+---@field _abilities table<integer, {level: integer, cd: number}>
+---@field _isHero boolean
+---@field _isDead boolean
+
+---@type integer
+local unitIdCounter = 0
+
+---@type table<unit, boolean>
+local allUnits = {}
+
+---@param owner player
+---@param unitTypeId integer
+---@param x number
+---@param y number
+---@param facing number
+---@return unit
+function CreateUnit(owner, unitTypeId, x, y, facing)
+    unitIdCounter = unitIdCounter + 1
+    local isHero = IsHeroUnitId(unitTypeId)
+    local unit = {
+        _id = unitIdCounter,
+        _typeId = unitTypeId,
+        _owner = owner,
+        _x = x,
+        _y = y,
+        _facing = facing,
+        _flyHeight = 0,
+        _maxHP = 100,
+        _curHP = 100,
+        _maxMana = 0,
+        _curMana = 0,
+        _baseDamage = 10,
+        _heroXP = 0,
+        _heroStr = 10,
+        _heroAgi = 10,
+        _heroInt = 10,
+        _heroProperName = nil,
+        _inventory = {},
+        _abilities = {},
+        _isHero = isHero,
+        _isDead = false,
+    }
+    allUnits[unit] = true
+    return unit
+end
+
+---@param u unit
+function RemoveUnit(u)
+    if u then
+        u._typeId = 0
+        allUnits[u] = nil
+    end
+end
+
+---@param u unit
+---@return integer
+function GetUnitTypeId(u)
+    if u and u._typeId then
+        return u._typeId
+    end
+    return 0
+end
+
+---@param u unit
+---@return number
+function GetUnitX(u)
+    return u and u._x or 0
+end
+
+---@param u unit
+---@return number
+function GetUnitY(u)
+    return u and u._y or 0
+end
+
+---@param u unit
+---@return number
+function GetUnitFacing(u)
+    return u and u._facing or 0
+end
+
+---@param u unit
+---@return number
+function GetUnitFlyHeight(u)
+    return u and u._flyHeight or 0
+end
+
+---@param u unit
+---@param height number
+---@param rate number
+function SetUnitFlyHeight(u, height, rate)
+    if u then u._flyHeight = height end
+end
+
+---@param u unit
+---@param x number
+---@param y number
+function SetUnitPosition(u, x, y)
+    if u then
+        u._x = x
+        u._y = y
+    end
+end
+
+---@param u unit
+---@return player
+function GetOwningPlayer(u)
+    return u and u._owner or Player(0)
+end
+
+---@param u unit
+---@return number
+function GetWidgetLife(u)
+    return u and u._curHP or 0
+end
+
+---@param u unit
+---@return integer
+function BlzGetUnitMaxHP(u)
+    return u and u._maxHP or 0
+end
+
+---@param u unit
+---@param hp integer
+function BlzSetUnitMaxHP(u, hp)
+    if u then u._maxHP = hp end
+end
+
+---@param u unit
+---@return integer
+function BlzGetUnitMaxMana(u)
+    return u and u._maxMana or 0
+end
+
+---@param u unit
+---@param mana integer
+function BlzSetUnitMaxMana(u, mana)
+    if u then u._maxMana = mana end
+end
+
+---@param u unit
+---@param index integer
+---@return integer
+function BlzGetUnitBaseDamage(u, index)
+    return u and u._baseDamage or 0
+end
+
+---@param u unit
+---@param damage integer
+---@param index integer
+function BlzSetUnitBaseDamage(u, damage, index)
+    if u then u._baseDamage = damage end
+end
+
+---@param u unit
+---@return integer
+function UnitInventorySize(u)
+    return 6
+end
+
+---@param u unit
+---@param slot integer
+---@return item?
+function UnitItemInSlot(u, slot)
+    return u and u._inventory and u._inventory[slot] or nil
+end
+
+---@param u unit
+---@param itemId integer
+---@param slot integer
+---@return boolean
+function UnitAddItemToSlotById(u, itemId, slot)
+    if u then
+        local item = CreateItem(itemId, 0, 0)
+        u._inventory[slot] = item
+        return true
+    end
+    return false
+end
+
+---@param u unit
+---@param abilityId integer
+---@return integer
+function GetUnitAbilityLevel(u, abilityId)
+    if u and u._abilities and u._abilities[abilityId] then
+        return u._abilities[abilityId].level
+    end
+    return 0
+end
+
+---@param u unit
+---@param abilityId integer
+---@return boolean
+function UnitAddAbility(u, abilityId)
+    if u then
+        u._abilities[abilityId] = {level = 1, cd = 0}
+        return true
+    end
+    return false
+end
+
+---@param u unit
+---@param abilityId integer
+---@return boolean
+function UnitRemoveAbility(u, abilityId)
+    if u then
+        u._abilities[abilityId] = nil
+        return true
+    end
+    return false
+end
+
+---@param u unit
+---@param abilityId integer
+function IncUnitAbilityLevel(u, abilityId)
+    if u and u._abilities and u._abilities[abilityId] then
+        u._abilities[abilityId].level = u._abilities[abilityId].level + 1
+    end
+end
+
+---@param u unit
+---@param abilityId integer
+function SelectHeroSkill(u, abilityId)
+    if u then
+        if not u._abilities[abilityId] then
+            u._abilities[abilityId] = {level = 0, cd = 0}
+        end
+        u._abilities[abilityId].level = u._abilities[abilityId].level + 1
+    end
+end
+
+---@param u unit
+---@param abilityId integer
+---@param cd number
+function BlzStartUnitAbilityCooldown(u, abilityId, cd)
+    if u and u._abilities and u._abilities[abilityId] then
+        u._abilities[abilityId].cd = cd
+    end
+end
+
+---@param u unit
+---@param abilityId integer
+---@return number
+function BlzGetUnitAbilityCooldownRemaining(u, abilityId)
+    if u and u._abilities and u._abilities[abilityId] then
+        return u._abilities[abilityId].cd
+    end
+    return 0
+end
+
+---@param u unit
+---@param index integer
+---@return table?
+function BlzGetUnitAbilityByIndex(u, index)
+    if u then
+        local i = 0
+        for abilId, data in pairs(u._abilities) do
+            if i == index then
+                return {_id = abilId, _level = data.level}
+            end
+            i = i + 1
+        end
+    end
+    return nil
+end
+
+---@param abil table
+---@return integer
+function BlzGetAbilityId(abil)
+    return abil and abil._id or 0
+end
+
+---@param u unit
+---@return integer
+function BlzGetUnitMovementType(u)
+    return 0
+end
+
+---@param u unit
+---@param field any
+---@return boolean
+function BlzGetUnitBooleanField(u, field)
+    return false
+end
+
+---@param u unit
+---@param field any
+---@param value boolean
+function BlzSetUnitBooleanField(u, field, value)
+end
+
+UNIT_BF_IS_A_BUILDING = "UNIT_BF_IS_A_BUILDING"
+
+---@param u unit
+---@param state any
+---@param value number
+function SetUnitState(u, state, value)
+    if u then
+        if state == UNIT_STATE_LIFE then
+            u._curHP = value
+        elseif state == UNIT_STATE_MANA then
+            u._curMana = value
+        end
+    end
+end
+
+---@param u unit
+---@param state any
+---@return number
+function GetUnitState(u, state)
+    if u then
+        if state == UNIT_STATE_LIFE then
+            return u._curHP
+        elseif state == UNIT_STATE_MANA then
+            return u._curMana
+        end
+    end
+    return 0
+end
+
+UNIT_STATE_LIFE = "UNIT_STATE_LIFE"
+UNIT_STATE_MANA = "UNIT_STATE_MANA"
+
+---@param u unit
+---@param invulnerable boolean
+function SetUnitInvulnerable(u, invulnerable)
+end
+
+---@param u unit
+---@param buffId integer
+---@param duration number
+function UnitApplyTimedLife(u, buffId, duration)
+end
+
+---@param unitTypeId integer
+---@return boolean
+function IsHeroUnitId(unitTypeId)
+    return unitTypeId >= 0x48000000 and unitTypeId < 0x49000000
+end
+
+---@param u unit
+---@param unitType any
+---@return boolean
+function IsUnitType(u, unitType)
+    if unitType == UNIT_TYPE_HERO then
+        return u and u._isHero or false
+    elseif unitType == UNIT_TYPE_DEAD then
+        return u and u._isDead or false
+    elseif unitType == UNIT_TYPE_SUMMONED then
+        return false
+    end
+    return false
+end
+
+UNIT_TYPE_HERO = "UNIT_TYPE_HERO"
+UNIT_TYPE_DEAD = "UNIT_TYPE_DEAD"
+UNIT_TYPE_SUMMONED = "UNIT_TYPE_SUMMONED"
+
+---@param u unit
+---@return integer
+function GetHeroXP(u)
+    return u and u._heroXP or 0
+end
+
+---@param u unit
+---@param xp integer
+---@param showEyeCandy boolean
+function SetHeroXP(u, xp, showEyeCandy)
+    if u then u._heroXP = xp end
+end
+
+---@param u unit
+---@return string
+function GetHeroProperName(u)
+    return u and u._heroProperName or ""
+end
+
+---@param u unit
+---@param name string
+function BlzSetHeroProperName(u, name)
+    if u then u._heroProperName = name end
+end
+
+---@param u unit
+---@param permanent boolean
+---@return integer
+function GetHeroStr(u, permanent)
+    return u and u._heroStr or 0
+end
+
+---@param u unit
+---@param value integer
+---@param permanent boolean
+function SetHeroStr(u, value, permanent)
+    if u then u._heroStr = value end
+end
+
+---@param u unit
+---@param permanent boolean
+---@return integer
+function GetHeroAgi(u, permanent)
+    return u and u._heroAgi or 0
+end
+
+---@param u unit
+---@param value integer
+---@param permanent boolean
+function SetHeroAgi(u, value, permanent)
+    if u then u._heroAgi = value end
+end
+
+---@param u unit
+---@param permanent boolean
+---@return integer
+function GetHeroInt(u, permanent)
+    return u and u._heroInt or 0
+end
+
+---@param u unit
+---@param value integer
+---@param permanent boolean
+function SetHeroInt(u, value, permanent)
+    if u then u._heroInt = value end
+end
+
+-- ============================================================================
+-- Item System (for StateSaver tests)
+-- ============================================================================
+
+---@class item
+---@field _id integer
+---@field _typeId integer
+---@field _x number
+---@field _y number
+---@field _charges integer
+---@field _life number
+
+---@type integer
+local itemIdCounter = 0
+
+---@param itemTypeId integer
+---@param x number
+---@param y number
+---@return item
+function CreateItem(itemTypeId, x, y)
+    itemIdCounter = itemIdCounter + 1
+    local item = {
+        _id = itemIdCounter,
+        _typeId = itemTypeId,
+        _x = x,
+        _y = y,
+        _charges = 1,
+        _life = 100,
+    }
+    return item
+end
+
+---@param item item
+---@return integer
+function GetItemTypeId(item)
+    return item and item._typeId or 0
+end
+
+---@param item item
+---@return number
+function GetItemX(item)
+    return item and item._x or 0
+end
+
+---@param item item
+---@return number
+function GetItemY(item)
+    return item and item._y or 0
+end
+
+---@param item item
+---@return integer
+function GetItemCharges(item)
+    return item and item._charges or 0
+end
+
+---@param item item
+---@param charges integer
+function SetItemCharges(item, charges)
+    if item then item._charges = charges end
+end
+
+-- ============================================================================
+-- Player State System (for StateSaver tests)
+-- ============================================================================
+
+---@type table<player, table<string, integer>>
+local playerStates = {}
+
+PLAYER_STATE_RESOURCE_GOLD = "PLAYER_STATE_RESOURCE_GOLD"
+PLAYER_STATE_RESOURCE_LUMBER = "PLAYER_STATE_RESOURCE_LUMBER"
+
+---@param p player
+---@param state string
+---@return integer
+function GetPlayerState(p, state)
+    if not playerStates[p] then
+        playerStates[p] = {}
+    end
+    return playerStates[p][state] or 0
+end
+
+---@param p player
+---@param state string
+---@param value integer
+function SetPlayerState(p, state, value)
+    if not playerStates[p] then
+        playerStates[p] = {}
+    end
+    playerStates[p][state] = value
+end
+
+---@param p player
+---@param techId integer
+---@param level integer
+function SetPlayerTechResearched(p, techId, level)
+end
+
+---@param p player
+---@param techId integer
+---@param level integer
+function AddPlayerTechResearched(p, techId, level)
+end
+
+-- ============================================================================
+-- Rect and Region System (for StateSaver tests)
+-- ============================================================================
+
+bj_mapInitialPlayableArea = {_type = "rect"}
+
+---@param rect any
+---@param filter any
+---@param callback function
+function EnumItemsInRect(rect, filter, callback)
+end
+
+-- ============================================================================
+-- Trigger Registration (for StateSaver tests)
+-- ============================================================================
+
+---@param trigger trigger
+---@param rect any
+function TriggerRegisterEnterRectSimple(trigger, rect)
+end
+
+---@param trigger trigger
+---@param rect any
+function TriggerRegisterLeaveRectSimple(trigger, rect)
+end
+
+---@param trigger trigger
+---@param event any
+function TriggerRegisterAnyUnitEventBJ(trigger, event)
+end
+
+---@param trigger trigger
+---@param condition function
+function TriggerAddCondition(trigger, condition)
+end
+
+---@param func function
+---@return function
+function Condition(func)
+    return func
+end
+
+function GetTriggerUnit()
+    return nil
+end
+
+function GetResearchingUnit()
+    return nil
+end
+
+function GetResearched()
+    return 0
+end
+
+EVENT_PLAYER_UNIT_RESEARCH_FINISH = "EVENT_PLAYER_UNIT_RESEARCH_FINISH"
+
+-- ============================================================================
+-- Elapsed Game Time (for StateSaver tests)
+-- ============================================================================
+
+local elapsedGameTime = 0
+
+---@return number
+function GetElapsedGameTime()
+    return elapsedGameTime
+end
+
+---@param time number
+function setElapsedGameTime(time)
+    elapsedGameTime = time
+end
+
+-- ============================================================================
+-- Math Utilities (for StateSaver tests)
+-- ============================================================================
+
+---@param x number
+---@return integer
+function Round(x)
+    return math.floor(x + 0.5)
+end
+
+-- ============================================================================
+-- Array Utilities (for StateSaver tests)
+-- ============================================================================
+
+---@param arr any[]
+---@param value any
+---@return integer?
+function ArrayFind(arr, value)
+    for i, v in ipairs(arr) do
+        if v == value then
+            return i
+        end
+    end
+    return nil
+end
+
+-- ============================================================================
+-- Hook System (for StateSaver tests)
+-- ============================================================================
+
+Hook = Hook or {}
+Hook.add = Hook.add or function(funcName, callback) end
+
+-- ============================================================================
+-- SyncedTable Mock (for StateSaver tests)
+-- ============================================================================
+
+SyncedTable = SyncedTable or {}
+SyncedTable.create = SyncedTable.create or function()
+    return {}
+end
+SyncedTable.FromIndexedTables = SyncedTable.FromIndexedTables or function(tbl)
+    return tbl
+end
+SyncedTable.ToIndexedTables = SyncedTable.ToIndexedTables or function(tbl)
+    return tbl
+end
+
+-- ============================================================================
+-- FourCC2Str (for StateSaver tests)
+-- ============================================================================
+
+---@param num integer
+---@return string
+function FourCC2Str(num)
+    local chars = {}
+    for i = 1, 4 do
+        local byte = (num >> (24 - (i - 1) * 8)) & 0xFF
+        table.insert(chars, string.char(byte))
+    end
+    return table.concat(chars)
+end
+
+-- ============================================================================
+-- LibDeflate Mock (for StateSaver tests)
+-- ============================================================================
+
+LibDeflate = LibDeflate or {}
+LibDeflate.CompressDeflate = LibDeflate.CompressDeflate or function(data)
+    return data
+end
+LibDeflate.DecompressDeflate = LibDeflate.DecompressDeflate or function(data)
+    return data
+end
+
+-- ============================================================================
 -- Utility Functions
 -- ============================================================================
 
