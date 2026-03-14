@@ -54,10 +54,11 @@ function OnUnitCreated(u)
 end
 
 OnInit.trig(function()
-    -- -- enum initial units
+    -- -- enum initial units - This isn't working for some reason
     -- local cond = Condition(function() return OnUnitCreated(GetEnumUnit()) end)
-    -- GroupEnumUnitsInRect(udg_g, bj_mapInitialPlayableArea, cond)
-    -- GroupClear(udg_g)
+    -- local g = CreateGroup()
+    -- GroupEnumUnitsInRect(g, bj_mapInitialPlayableArea, cond)
+    -- GroupClear(g)
     -- DestroyCondition(cond)
     -- Unit created
     local t = CreateTrigger()

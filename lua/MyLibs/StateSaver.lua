@@ -22,7 +22,7 @@ filterSkills = {}
 
 local SAVE_FOLDER_PATH = 'Savegames\\TestMap\\SavedState\\'  -- needs to end with \\
 
-MaxHumanPlayers = bj_MAX_PLAYER_SLOTS -- the last slot id that might belongs to a human player
+MaxHumanPlayers = 23 -- the last slot id that might belongs to a human player
 --- End Configurations ---
 
 StateSaver = {}
@@ -229,6 +229,7 @@ end
 local function PlayerMapped(savedPid)
     local map = SaveStateDatas[fileLoading].OldToNewPid
     if map ~= nil then
+        LogWrite("!!!!", savedPid, map, map)
         return Player(map[savedPid])
     end
     return Player(savedPid)
@@ -259,6 +260,7 @@ end
 
 function populatePlayerIdxMap()
     debugPrint(false, "Creating player index map. ", os.clock())
+    curPlayerNames = {}
     populatePlayerNames(curPlayerNames)
 
     for i = 1, 4 do
