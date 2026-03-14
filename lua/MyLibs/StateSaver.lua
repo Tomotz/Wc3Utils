@@ -3,6 +3,7 @@ if Debug then Debug.beginFile("StateSaver") end
 --- https://www.hiveworkshop.com/threads/magi-log-n-load-the-ultimate-save-load-system.357602/
 
 do
+StateSaver = {}
 
 --- Configurations ---
 local IS_DEBUG = false -- enable debug prints
@@ -233,14 +234,25 @@ local function PlayerMapped(savedPid)
     return Player(savedPid)
 end
 
+local function isPlayerActiveDontUse(p)
+    -- The functions here can cause a desync if used many times. Use PlayersArr[plr].isActive instead after initialization.
+    return GetPlayerController(p) == MAP_CONTROL_USER and GetPlayerSlotState(p) == PLAYER_SLOT_STATE_PLAYING
+end
+
+wasActivePlayers = {} ---@type integer[]
+OnInit.final(function()
+    for i = 0, bj_MAX_PLAYER_SLOTS - 1 do
+        if isPlayerActiveDontUse(Player(i)) then
+            table.insert(wasActivePlayers, i)
+        end
+    end
+end)
+
 ---@param tbl string[]
 --- Fills the table with all the player names. Note that the index in the table is the player index + 1
 local function populatePlayerNames(tbl)
-    for i = 0, bj_MAX_PLAYER_SLOTS - 1 do
-        local name = GetPlayerName(Player(i)) or ""
-        if name:match("^Player \x25d+$") then
-            name = ""
-        end
+    for i = 0, #wasActivePlayers do
+        local name = GetPlayerName(Player(wasActivePlayers[i])) or ""
         table.insert(tbl, name)
     end
 end
