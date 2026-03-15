@@ -338,6 +338,18 @@ function DestroyTrigger(trigger)
     activeTriggers[trigger._id] = nil
 end
 
+---@param whichTrigger trigger
+---@param whichPlayer player
+---@param whichPlayerUnitEvent playerunitevent
+---@param filter? boolexpr
+---@return event
+function TriggerRegisterPlayerUnitEvent(whichTrigger, whichPlayer, whichPlayerUnitEvent, filter)
+    -- This is a mock, so we won't implement actual event registration logic
+    -- In a real implementation, you'd want to store this information and check it when simulating events
+    return nil
+end
+
+
 -- ============================================================================
 -- Sync Data System
 -- ============================================================================

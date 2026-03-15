@@ -1,6 +1,8 @@
 if Debug then Debug.beginFile("StateTracker") end
 
+--- StateTracker v1.0.0 by Tomotz
 --- Helper for StateSaver.lua - tracks game changes
+--- All dependencies are written in StateSaver
 
 ---@class HookFunc
 ---@field name string -- name of the hooked function
@@ -112,6 +114,17 @@ local function addUnitFuncHook(funcName)
     end)
 end
 
+function UnitLearnSkillAction()
+    local skill_id = GetLearnedSkill()
+    local u = GetTriggerUnit()
+    if AllUnitIds[u] ~= nil then
+        if AllUnitIds[u].learnedSkills == nil then
+            AllUnitIds[u].learnedSkills = {}
+        end
+        AllUnitIds[u].learnedSkills[skill_id] = true
+    end
+end
+
 OnInit.global(function()
     -- Track important changes in the unit indexer
     for _, funcName in ipairs(hookedUnitFuncs) do
@@ -138,6 +151,11 @@ OnInit.global(function()
         AllUnitIds[whichUnit].expireTime = GetElapsedGameTime() + duration
         AllUnitIds[whichUnit].buffId = buffId
     end)
+    local TrigUnitLearnSkill = CreateTrigger()
+    TriggerAddAction(TrigUnitLearnSkill, UnitLearnSkillAction)
+    for i = 0, bj_MAX_PLAYER_SLOTS - 1 do
+        TriggerRegisterPlayerUnitEvent(TrigUnitLearnSkill, Player(i), EVENT_PLAYER_HERO_SKILL)
+    end
 end)
 
 if Debug then Debug.endFile() end
