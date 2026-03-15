@@ -1,7 +1,69 @@
 if Debug then Debug.beginFile("StateSaver") end
---- This system is based on MagiLogNLoad and some of the code is taken from it directly
---- https://www.hiveworkshop.com/threads/magi-log-n-load-the-ultimate-save-load-system.357602/
 
+--[[
+StateSaver v1.0.0 by Tomotz
+This system is based on MagiLogNLoad and some of the code is taken from it directly (although most code was changed completely)
+https://www.hiveworkshop.com/threads/magi-log-n-load-the-ultimate-save-load-system.357602/
+
+A system that allows you to Save/Load multiplayer custom games like the warcraft 3 save/load functionality.
+It saves all units (including all stats, state, items and current location), skills (including levels and current cd), items (including location), player state (gold, lumber, research). It also supports saving global variables - you must specify each such variable.
+Powered by Serializer.lua, the variables can contain many data types - booleans, numbers (integers and floats), strings, units, items and tables including recursive tables.
+
+How is works: when SaveState is called, all the state data is collected and dumped in a packed format to a state file. This will happen for all players.
+The data also contains all player names. Loading is done by a single player - the state files from his computer are synchronized between all players (via LoadStateFiles), and if all players in the current game played in the previous game as well, he can load it with LoadState. The order of the players doesn't matter, and any missing players will be loaded to a free player slot.
+
+This system will not work out of the box - You must prepare the map to it
+ - You must clear any units/buildings/items or add them to the filters in the configuration so they aren't loaded twice.
+ - You must make sure to disable/enable any triggers based on the state you are loading, as this is not saved by the system.
+ - You must make sure to save any variables you need so they are loaded in the state.
+
+The attached test map is pretty bad and can't really show the full potential of the system. If you want to see it in action, you are welcome to try DawnOfTheDead https://www.hiveworkshop.com/threads/dawnofthedead-7-01-stable.368717/ (Had some bugfixes and additions to it since the stable version, but should be good enough)
+
+API:
+
+--- Loads the state from the file at index fileIdx.
+--- Note - LoadStateFiles must be called before each invocation of this function.
+---@param fileIdx integer -- the index of the file to load in the state array.
+---@param callback function? -- a function to call after loading everything besides hero skills and stats (this allows running things that might change those stats)
+function StateSaver.LoadState(fileIdx, callback)
+
+--- Loads a list of state files without unpacking them. A blocking function that can take a short while
+--- Note - Must be called from a context where you can run TriggerSleepAction.
+---@param whichPlayer player -- the player that requested the load
+---@param StateFileNames string[] -- the name of the files to load the state from
+function StateSaver.LoadStateFiles(whichPlayer, StateFileNames)
+
+---@param argName string
+function StateSaver.RecordVariable(argName)
+
+---@param StateFileName string -- the name of the file to save the state to
+---@param stateId integer? -- a unique id for the state
+function StateSaver.SaveState(StateFileName, stateId)
+
+Optional requirements
+    DebugUtils by Eikonium @ https://www.hiveworkshop.com/threads/330758/
+    LogUtils by me @ https://www.hiveworkshop.com/threads/logutils.357625/
+
+Requirements:
+    Total Initialization by Bribe @ https://www.hiveworkshop.com/threads/317099/
+    Serializer (by me) @ https://www.hiveworkshop.com/threads/serializer.367951/
+    FileIO (my version) (Code under the Serializer lib)
+    SyncStream (my version) @ https://www.hiveworkshop.com/threads/optimized-syncstream-and-stringescape.367925/
+    My versions of SyncStream and FileIO are needed to be able to save/load all characters correctly (which the original versions can't do)
+    LibDeflate by Magi @ https://www.hiveworkshop.com/threads/magi-log-n-load-the-ultimate-save-load-system.357602/
+    SyncedTable by Eikonium @ https://www.hiveworkshop.com/threads/syncedtable.353715/
+    Hook by Bribe @ https://www.hiveworkshop.com/threads/hook.339153/
+    StateTracker (by me) - Code attached here
+
+Recommended usage:
+Have a few checkpoints in the game where you automatically call SaveState (save each checkpoint with it's own name).
+At game start, call LoadStateFiles to load all checkpoints, and give the user a selection with all available states.
+If chosen, use LoadState to load the correct file.
+
+- Note - fog of war state is not saved. It might be added in a future update
+
+Updated: Mar 2026
+]]
 do
 StateSaver = {}
 
@@ -229,7 +291,6 @@ end
 local function PlayerMapped(savedPid)
     local map = SaveStateDatas[fileLoading].OldToNewPid
     if map ~= nil then
-        LogWrite("!!!!", savedPid, map, map)
         return Player(map[savedPid])
     end
     return Player(savedPid)
@@ -365,10 +426,10 @@ end
 ---@param unitData UnitDumpData
 local function LoadUnitState(unitData)
     local u = UniqueIdToUnit[unitData.uniqueId]
+
     if u == nil then return end
     if unitData.heroSkills then
         for _, skill in ipairs(unitData.heroSkills) do
-
             for _ = 1, skill.level do
                 SelectHeroSkill(u, skill.id)
             end
