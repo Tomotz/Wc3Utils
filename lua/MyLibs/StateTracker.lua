@@ -66,13 +66,6 @@ OnInit.trig(function()
     local t = CreateTrigger()
     TriggerRegisterEnterRectSimple(t, bj_mapInitialPlayableArea)
     TriggerAddCondition(t, Condition(function() return OnUnitCreated(GetTriggerUnit()) end))
-    -- Unit leaves
-    t = CreateTrigger()
-    TriggerRegisterLeaveRectSimple(t, bj_mapInitialPlayableArea)
-    TriggerAddAction(t, function()
-        local u = GetTriggerUnit()
-        RemoveUnit(u)
-    end)
 end)
 
 --- Important functions that are used on a unit and we would like to reapply when loading state. Note that all those functions must get the unit as first argument.
