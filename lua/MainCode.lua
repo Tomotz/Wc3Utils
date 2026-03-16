@@ -32,6 +32,10 @@ function CrashingFun()
 end
 
 function CrashTest()
+    local a = CreateUnit(Player(0), FourCC("hfoo"), 0,0,0)
+    SetUnitX(a, 10000)
+    IssuePointOrder(a, 'attack', 0, 0)
+
     -- print("Crash test ExecuteFunc")
     -- ExecuteFunc("CrashingFun")
     -- TriggerSleepAction(1)
@@ -42,22 +46,22 @@ function CrashTest()
     --     TriggerSleepAction(5)
     --     print("sleep from wc3 coroutine done")
     -- end)
-    FileIO.Save("test1.txt", "n")
-    local test1 = FileIO.Load("test1.txt")
-    if test1 == nil then
-        test1 = "nil"
-        print("test1 is nil!")
-    else
-        print(test1)
-    end
-    FileIO.Save("test.txt", "\n")
-    local test = FileIO.Load("test.txt")
-    if test == nil then
-        test = "nil"
-        print("test is nil!")
-    else
-        print(test)
-    end
+    -- FileIO.Save("test1.txt", "n")
+    -- local test1 = FileIO.Load("test1.txt")
+    -- if test1 == nil then
+    --     test1 = "nil"
+    --     print("test1 is nil!")
+    -- else
+    --     print(test1)
+    -- end
+    -- FileIO.Save("test.txt", "\n")
+    -- local test = FileIO.Load("test.txt")
+    -- if test == nil then
+    --     test = "nil"
+    --     print("test is nil!")
+    -- else
+    --     print(test)
+    -- end
 
     -- print("TimerCrashTest")
     -- local tt = CreateTimer()
