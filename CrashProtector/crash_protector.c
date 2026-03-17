@@ -134,8 +134,31 @@ static LONG CALLBACK NullAccessHandler(PEXCEPTION_POINTERS ep) {
 
     LONG count = InterlockedIncrement(&g_crashesSaved);
 
+    /* Resolve the faulting RIP to a module name + offset */
+    HMODULE hFaultMod = NULL;
+    char modName[MAX_PATH] = "???";
+    DWORD64 modOffset = 0;
+    GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCSTR)rip, &hFaultMod);
+    if (hFaultMod) {
+        GetModuleFileNameA(hFaultMod, modName, MAX_PATH);
+        modOffset = (DWORD64)(rip - (BYTE*)hFaultMod);
+    }
+
     LogEvent("SAVED #%ld: %s addr=0x%016llX RIP=0x%016llX instrLen=%u", count, (accessType == 0) ? "READ" : "WRITE",
              (unsigned long long)addr, (unsigned long long)rip, instrLen);
+    LogEvent("  Module: %s +0x%llX", modName, (unsigned long long)modOffset);
+
+    CONTEXT* ctx = ep->ContextRecord;
+    LogEvent("  RAX=%016llX RBX=%016llX RCX=%016llX RDX=%016llX",
+             ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx);
+    LogEvent("  RSI=%016llX RDI=%016llX RBP=%016llX RSP=%016llX",
+             ctx->Rsi, ctx->Rdi, ctx->Rbp, ctx->Rsp);
+    LogEvent("  R8 =%016llX R9 =%016llX R10=%016llX R11=%016llX",
+             ctx->R8, ctx->R9, ctx->R10, ctx->R11);
+    LogEvent("  R12=%016llX R13=%016llX R14=%016llX R15=%016llX",
+             ctx->R12, ctx->R13, ctx->R14, ctx->R15);
 
     if (accessType == 0) {
         /* READ: zero the destination register so the game gets 0 */
