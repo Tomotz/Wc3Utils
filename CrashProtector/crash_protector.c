@@ -172,8 +172,8 @@ static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
     /* Advance past the faulting instruction */
     ep->ContextRecord->Rip += instrLen;
 
-    /* Show a window popup message on the 2nd event, and on the 50th */
-    if (count == 2 || count == 50) {
+    /* Show a window popup message on the 1st event, and on the 20th */
+    if (count == 1 || count == 20) {
         char msg[300];
         sprintf_s(msg, sizeof(msg),
                   "CrashProtector: Saved from crashing.\n"
@@ -266,8 +266,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         GetCurrentDirectoryA(MAX_PATH, cwd);
         LogEvent("=== CrashProtector loaded (PID %lu) ===", GetCurrentProcessId());
 
-        /* Install the exception handler (priority = first) */
-        if (AddVectoredExceptionHandler(1, InvalidAccessHandler)) {
+        /* Install the exception handler (priority = last/ Let other handler handle this first) */
+        if (AddVectoredExceptionHandler(0, InvalidAccessHandler)) {
             LogEvent("Vectored exception handler installed successfully");
         } else {
             LogEvent("ERROR: Failed to install exception handler!");
