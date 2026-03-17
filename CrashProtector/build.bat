@@ -8,14 +8,12 @@ REM   3. Run: build.bat
 REM
 REM Usage: from power shell: ./build.bat "D:\Program Files (x86)\Warcraft III\_retail_\x86_64" "(adjust path to your wc install location)"
 
-REM After this we run install CrashProtector into WC3 Reforged directory
+REM After this we install CrashProtector into WC3 Reforged directory
 REM
-REM This does two things:
-REM   1. Copies the REAL system version.dll and renames it to real_version.dll
-REM   2. Copies our version.dll (CrashProtector) into the game folder
+REM This copies our version.dll (CrashProtector) into the game folder.
 REM
 REM When WC3 starts, it loads our version.dll first. Our DLL installs the
-REM crash handler, and forwards all normal version.dll calls to real_version.dll.
+REM crash handler, and forwards all normal version.dll calls to the system version.dll.
 
 
 REM Activate the x64 compiler environment - Change this to wherever you have Visual Studio Build Tools installed
@@ -60,21 +58,8 @@ echo.
 echo Installing CrashProtector to: %WC3DIR%
 echo.
 
-REM Step 1: Copy the real system version.dll (64-bit from System32)
-if not exist "%WC3DIR%\real_version.dll" (
-    echo [1/2] Copying real version.dll from system...
-    copy "C:\Windows\System32\version.dll" "%WC3DIR%\real_version.dll" >nul
-    if %ERRORLEVEL% NEQ 0 (
-        echo ERROR: Could not copy system version.dll. Try running as Administrator.
-        exit /b 1
-    )
-    echo       Done.
-) else (
-    echo [1/2] real_version.dll already exists, skipping.
-)
-
-REM Step 2: Copy our proxy version.dll
-echo [2/2] Copying CrashProtector version.dll...
+REM Copy our proxy version.dll
+echo Copying CrashProtector version.dll...
 copy /Y "version.dll" "%WC3DIR%\version.dll" >nul
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: Could not copy. Make sure WC3 is not running. Try running as Administrator.
@@ -89,7 +74,5 @@ echo Launch WC3 normally through Battle.net.
 echo If a crash is caught, you'll see a popup and a log file:
 echo   %WC3DIR%\crash_protector.log
 echo.
-echo To UNINSTALL: delete these two files from the WC3 folder:
-echo   version.dll
-echo   real_version.dll
+echo To UNINSTALL: delete version.dll from the WC3 folder.
 

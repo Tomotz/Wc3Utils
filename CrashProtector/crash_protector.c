@@ -5,8 +5,8 @@
  * Installs a Vectored Exception Handler that catches null-page
  * access violations, skips the faulting instruction, and logs the event.
  *
- * The .def file forwards all real version.dll exports to "real_version.dll",
- * which is the original system version.dll copied into the game folder.
+ * The .def file forwards all real version.dll exports by loading
+ * the original system version.dll from System32 at runtime.
  */
 
 #define WIN32_LEAN_AND_MEAN
