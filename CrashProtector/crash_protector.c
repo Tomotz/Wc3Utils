@@ -37,35 +37,85 @@ void ShowBalloon(const char* title, const char* message)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Logging                                                           */
+/*  Async Logging                                                     */
 /* ------------------------------------------------------------------ */
 
 static HANDLE g_logFile = INVALID_HANDLE_VALUE;
-static CRITICAL_SECTION g_logLock;
 static volatile LONG g_crashesSaved = 0;
 static char cwd[MAX_PATH];
 
+/* Lock-free ring buffer for async log writes */
+#define LOG_RING_SIZE 256          /* must be power of 2 */
+#define LOG_ENTRY_SIZE 512
+
+static char g_logRing[LOG_RING_SIZE][LOG_ENTRY_SIZE];
+static volatile LONG g_logHead = 0;  /* next slot to write */
+static volatile LONG g_logTail = 0;  /* next slot to read  */
+static HANDLE g_logEvent = NULL;     /* signals writer thread */
+static HANDLE g_logThread = NULL;
+static volatile LONG g_logShutdown = 0;
+
+static DWORD WINAPI LogWriterThread(LPVOID param) {
+    (void)param;
+    while (!g_logShutdown) {
+        WaitForSingleObject(g_logEvent, 500); /* wake on signal or periodic flush */
+
+        while (g_logTail != g_logHead) {
+            LONG slot = g_logTail & (LOG_RING_SIZE - 1);
+            DWORD len = (DWORD)strlen(g_logRing[slot]);
+            if (g_logFile != INVALID_HANDLE_VALUE) {
+                DWORD written;
+                WriteFile(g_logFile, g_logRing[slot], len, &written, NULL);
+                WriteFile(g_logFile, "\r\n", 2, &written, NULL);
+            }
+            InterlockedIncrement(&g_logTail);
+        }
+
+        if (g_logFile != INVALID_HANDLE_VALUE)
+            FlushFileBuffers(g_logFile);
+    }
+
+    /* Drain remaining entries on shutdown */
+    while (g_logTail != g_logHead) {
+        LONG slot = g_logTail & (LOG_RING_SIZE - 1);
+        DWORD len = (DWORD)strlen(g_logRing[slot]);
+        if (g_logFile != INVALID_HANDLE_VALUE) {
+            DWORD written;
+            WriteFile(g_logFile, g_logRing[slot], len, &written, NULL);
+            WriteFile(g_logFile, "\r\n", 2, &written, NULL);
+        }
+        InterlockedIncrement(&g_logTail);
+    }
+    if (g_logFile != INVALID_HANDLE_VALUE)
+        FlushFileBuffers(g_logFile);
+
+    return 0;
+}
+
 static void LogEvent(const char* fmt, ...) {
-    char buf[512];
-    va_list args;
-    va_start(args, fmt);
+    /* Grab a slot - if ring is full, drop the message (never block the game) */
+    LONG head, next;
+    do {
+        head = g_logHead;
+        next = head + 1;
+        if ((next - g_logTail) >= LOG_RING_SIZE)
+            return; /* ring full, drop message */
+    } while (InterlockedCompareExchange(&g_logHead, next, head) != head);
+
+    LONG slot = head & (LOG_RING_SIZE - 1);
 
     SYSTEMTIME st;
     GetLocalTime(&st);
-    int prefix =
-        sprintf_s(buf, sizeof(buf), "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    int prefix = sprintf_s(g_logRing[slot], LOG_ENTRY_SIZE,
+        "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 
-    int msg = vsprintf_s(buf + prefix, sizeof(buf) - prefix, fmt, args);
+    va_list args;
+    va_start(args, fmt);
+    vsprintf_s(g_logRing[slot] + prefix, LOG_ENTRY_SIZE - prefix, fmt, args);
     va_end(args);
 
-    EnterCriticalSection(&g_logLock);
-    if (g_logFile != INVALID_HANDLE_VALUE) {
-        DWORD written;
-        WriteFile(g_logFile, buf, prefix + msg, &written, NULL);
-        WriteFile(g_logFile, "\r\n", 2, &written, NULL);
-        FlushFileBuffers(g_logFile);
-    }
-    LeaveCriticalSection(&g_logLock);
+    /* Signal the writer thread */
+    if (g_logEvent) SetEvent(g_logEvent);
 }
 
 /* ------------------------------------------------------------------ */
@@ -257,11 +307,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         LoadRealVersion();
         DisableThreadLibraryCalls(hModule);
 
-        /* Set up logging */
-        InitializeCriticalSection(&g_logLock);
-
-        /* Log file goes next to the game exe */
+        /* Set up async logging */
         g_logFile = CreateFileA("crash_protector.log", GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        g_logEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+        g_logThread = CreateThread(NULL, 0, LogWriterThread, NULL, 0, NULL);
 
         GetCurrentDirectoryA(MAX_PATH, cwd);
         LogEvent("=== CrashProtector loaded (PID %lu) ===", GetCurrentProcessId());
@@ -276,8 +325,16 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         LogEvent("Ready - monitoring for invalid pointer access violations");
     } else if (reason == DLL_PROCESS_DETACH) {
         LogEvent("=== CrashProtector unloading. Total crashes saved: %ld ===", g_crashesSaved);
+
+        /* Shut down the log writer thread (give it 2s to drain) */
+        InterlockedExchange(&g_logShutdown, 1);
+        if (g_logEvent) SetEvent(g_logEvent);
+        if (g_logThread) {
+            WaitForSingleObject(g_logThread, 2000);
+            CloseHandle(g_logThread);
+        }
+        if (g_logEvent) CloseHandle(g_logEvent);
         if (g_logFile != INVALID_HANDLE_VALUE) CloseHandle(g_logFile);
-        DeleteCriticalSection(&g_logLock);
         if (g_realVersion) FreeLibrary(g_realVersion);
     }
 
