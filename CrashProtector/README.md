@@ -31,7 +31,8 @@ CrashProtector uses a technique called **DLL proxying**:
 - **Injection Method**: DLL proxying via version.dll
 - **Exception Handling**: Vectored Exception Handler with priority 1 (first handler)
 - **Instruction Skipping**: Uses HDE64 (Hacker Disassembler Engine) to decode and skip faulting instructions
-- **Logging**: Thread-safe logging with critical sections
+- **Logging**: Lock-free async ring buffer with background writer thread
+- **Stack Traces**: If the game executable has debug symbols (PDB), stack traces with function names and source lines are included in the log. DbgHelp is loaded dynamically — zero overhead when no symbols are present.
 
 ## Installation
 
@@ -64,7 +65,7 @@ Just launch WC3 normally through Battle.net. The crash protector runs automatica
 
 When crashes are caught:
 - A notification balloon appears on the 2nd and 50th crash
-- All crashes are logged to `crash_protector.log` with timestamps, faulting module name + offset, and a full register dump
+- All crashes are logged to `crash_protector.log` with timestamps, faulting module name + offset, a full register dump, and stack traces (when symbols are available)
 - The game continues running
 
 ## Uninstallation
@@ -74,7 +75,7 @@ Delete `version.dll` from your WC3 x86_64 folder. WC3 will revert to using the s
 ## Log File Example
 
 ```
-[14:23:45.123] === CrashProtector loaded (PID 12345) ===
+[14:23:45.123] === CrashProtector loaded (PID 12345, symbols=YES) ===
 [14:23:45.125] Vectored exception handler installed successfully
 [14:23:45.126] Ready - monitoring for null pointer access violations
 [14:24:12.456] SAVED #1: READ addr=0x0000000000000000 RIP=0x00007FF712345678 instrLen=7
@@ -83,6 +84,10 @@ Delete `version.dll` from your WC3 x86_64 folder. WC3 will revert to using the s
 [14:24:12.456]   RSI=00000000004A2F10 RDI=0000000000000000 RBP=00000000006FF800 RSP=00000000006FF7A0
 [14:24:12.456]   R8 =0000000000000000 R9 =0000000000000000 R10=0000000000000000 R11=0000000000000246
 [14:24:12.456]   R12=0000000000000000 R13=0000000000000000 R14=0000000000000000 R15=0000000000000000
+[14:24:12.456]   --- Stack Trace ---
+[14:24:12.456]   [ 0] 0x00007FF712345678  SomeFunction+0x1A  (game.cpp:1234)
+[14:24:12.456]   [ 1] 0x00007FF71234ABCD  CallerFunction+0x42
+[14:24:12.456]   [ 2] 0x00007FF712340000  main+0x100  (main.cpp:56)
 [14:24:15.789] SAVED #2: WRITE addr=0x0000000000000010 RIP=0x00007FF712345ABC instrLen=6
 [14:24:15.789]   Module: C:\Program Files (x86)\Warcraft III\_retail_\x86_64\Warcraft III.exe +0x345ABC
 [14:24:15.789]   ...

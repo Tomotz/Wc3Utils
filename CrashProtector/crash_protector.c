@@ -19,6 +19,125 @@
 
 #pragma comment(lib, "Shell32.lib")
 
+/* ------------------------------------------------------------------ */
+/*  DbgHelp – loaded dynamically so there is zero cost without a PDB  */
+/* ------------------------------------------------------------------ */
+
+#include <dbghelp.h>
+
+typedef BOOL  (WINAPI *pfnSymInitialize)(HANDLE, PCSTR, BOOL);
+typedef BOOL  (WINAPI *pfnSymCleanup)(HANDLE);
+typedef BOOL  (WINAPI *pfnSymFromAddr)(HANDLE, DWORD64, PDWORD64, PSYMBOL_INFO);
+typedef BOOL  (WINAPI *pfnSymGetLineFromAddr64)(HANDLE, DWORD64, PDWORD, PIMAGEHLP_LINE64);
+typedef BOOL  (WINAPI *pfnStackWalk64)(DWORD, HANDLE, HANDLE, LPSTACKFRAME64,
+              PVOID, PREAD_PROCESS_MEMORY_ROUTINE64,
+              PFUNCTION_TABLE_ACCESS_ROUTINE64,
+              PGET_MODULE_BASE_ROUTINE64, PTRANSLATE_ADDRESS_ROUTINE64);
+typedef PVOID (WINAPI *pfnSymFunctionTableAccess64)(HANDLE, DWORD64);
+typedef DWORD64 (WINAPI *pfnSymGetModuleBase64)(HANDLE, DWORD64);
+
+static HMODULE                       g_dbgHelp;
+static pfnSymInitialize              g_SymInitialize;
+static pfnSymCleanup                 g_SymCleanup;
+static pfnSymFromAddr                g_SymFromAddr;
+static pfnSymGetLineFromAddr64       g_SymGetLineFromAddr64;
+static pfnStackWalk64                g_StackWalk64;
+static pfnSymFunctionTableAccess64   g_SymFunctionTableAccess64;
+static pfnSymGetModuleBase64         g_SymGetModuleBase64;
+static BOOL                          g_hasSymbols = FALSE;
+
+/* Forward declaration – LogEvent is defined later with the async ring buffer */
+static void LogEvent(const char* fmt, ...);
+
+static void InitSymbols(void) {
+    g_dbgHelp = LoadLibraryA("dbghelp.dll");
+    if (!g_dbgHelp) return;
+
+    g_SymInitialize            = (pfnSymInitialize)           GetProcAddress(g_dbgHelp, "SymInitialize");
+    g_SymCleanup               = (pfnSymCleanup)              GetProcAddress(g_dbgHelp, "SymCleanup");
+    g_SymFromAddr              = (pfnSymFromAddr)              GetProcAddress(g_dbgHelp, "SymFromAddr");
+    g_SymGetLineFromAddr64     = (pfnSymGetLineFromAddr64)    GetProcAddress(g_dbgHelp, "SymGetLineFromAddr64");
+    g_StackWalk64              = (pfnStackWalk64)              GetProcAddress(g_dbgHelp, "StackWalk64");
+    g_SymFunctionTableAccess64 = (pfnSymFunctionTableAccess64)GetProcAddress(g_dbgHelp, "SymFunctionTableAccess64");
+    g_SymGetModuleBase64       = (pfnSymGetModuleBase64)      GetProcAddress(g_dbgHelp, "SymGetModuleBase64");
+
+    if (!g_SymInitialize || !g_StackWalk64 || !g_SymFunctionTableAccess64 || !g_SymGetModuleBase64) return;
+
+    HANDLE hProc = GetCurrentProcess();
+    if (!g_SymInitialize(hProc, NULL, TRUE)) return;
+
+    /* Probe: check if the main executable (wc3.exe) has symbols loaded. */
+    /* The entry point is a known valid address inside the EXE. */
+    HMODULE hExe = GetModuleHandleA(NULL);
+    if (hExe && g_SymFromAddr) {
+        /* Use the EXE's base address + entry point from the PE header */
+        DWORD64 probeAddr = (DWORD64)hExe;
+        IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)hExe;
+        IMAGE_NT_HEADERS* nt  = (IMAGE_NT_HEADERS*)((BYTE*)hExe + dos->e_lfanew);
+        probeAddr += nt->OptionalHeader.AddressOfEntryPoint;
+
+        char buf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+        PSYMBOL_INFO sym = (PSYMBOL_INFO)buf;
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen   = MAX_SYM_NAME;
+        DWORD64 disp = 0;
+        if (g_SymFromAddr(hProc, probeAddr, &disp, sym))
+            g_hasSymbols = TRUE;
+    }
+}
+
+static void LogStackTrace(CONTEXT* ctx) {
+    if (!g_hasSymbols) return;
+
+    HANDLE hProc   = GetCurrentProcess();
+    HANDLE hThread = GetCurrentThread();
+
+    CONTEXT ctxCopy = *ctx;  /* StackWalk64 may modify the context */
+
+    STACKFRAME64 frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.AddrPC.Offset    = ctxCopy.Rip;
+    frame.AddrPC.Mode      = AddrModeFlat;
+    frame.AddrFrame.Offset = ctxCopy.Rbp;
+    frame.AddrFrame.Mode   = AddrModeFlat;
+    frame.AddrStack.Offset = ctxCopy.Rsp;
+    frame.AddrStack.Mode   = AddrModeFlat;
+
+    LogEvent("  --- Stack Trace ---");
+
+    for (int i = 0; i < 64; i++) {
+        if (!g_StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProc, hThread, &frame,
+                           &ctxCopy, NULL, g_SymFunctionTableAccess64,
+                           g_SymGetModuleBase64, NULL))
+            break;
+
+        if (frame.AddrPC.Offset == 0) break;
+
+        DWORD64 pc = frame.AddrPC.Offset;
+
+        /* Resolve symbol name */
+        char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+        PSYMBOL_INFO sym = (PSYMBOL_INFO)symBuf;
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen   = MAX_SYM_NAME;
+        DWORD64 symDisp = 0;
+        const char* funcName = "???";
+        if (g_SymFromAddr && g_SymFromAddr(hProc, pc, &symDisp, sym))
+            funcName = sym->Name;
+
+        /* Resolve source file + line */
+        IMAGEHLP_LINE64 line;
+        line.SizeOfStruct = sizeof(line);
+        DWORD lineDisp = 0;
+        if (g_SymGetLineFromAddr64 && g_SymGetLineFromAddr64(hProc, pc, &lineDisp, &line))
+            LogEvent("  [%2d] 0x%016llX  %s+0x%llX  (%s:%lu)", i, (unsigned long long)pc,
+                     funcName, (unsigned long long)symDisp, line.FileName, line.LineNumber);
+        else
+            LogEvent("  [%2d] 0x%016llX  %s+0x%llX", i, (unsigned long long)pc,
+                     funcName, (unsigned long long)symDisp);
+    }
+}
+
 void ShowBalloon(const char* title, const char* message)
 {
     NOTIFYICONDATAA nid = {0};
@@ -207,6 +326,8 @@ static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
     LogEvent("  R12=%016llX R13=%016llX R14=%016llX R15=%016llX",
              ctx->R12, ctx->R13, ctx->R14, ctx->R15);
 
+    LogStackTrace(ctx);
+
     if (accessType == 0) {
         /* READ: zero the destination register so the game gets 0 */
         if (hs.flags & F_MODRM) {
@@ -313,7 +434,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         g_logThread = CreateThread(NULL, 0, LogWriterThread, NULL, 0, NULL);
 
         GetCurrentDirectoryA(MAX_PATH, cwd);
-        LogEvent("=== CrashProtector loaded (PID %lu) ===", GetCurrentProcessId());
+        InitSymbols();
+        LogEvent("=== CrashProtector loaded (PID %lu, symbols=%s) ===",
+                 GetCurrentProcessId(), g_hasSymbols ? "YES" : "NO");
 
         /* Install the exception handler (priority = last/ Let other handler handle this first) */
         if (AddVectoredExceptionHandler(0, InvalidAccessHandler)) {
@@ -335,6 +458,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         }
         if (g_logEvent) CloseHandle(g_logEvent);
         if (g_logFile != INVALID_HANDLE_VALUE) CloseHandle(g_logFile);
+        if (g_hasSymbols && g_SymCleanup) g_SymCleanup(GetCurrentProcess());
+        if (g_dbgHelp) FreeLibrary(g_dbgHelp);
         if (g_realVersion) FreeLibrary(g_realVersion);
     }
 
