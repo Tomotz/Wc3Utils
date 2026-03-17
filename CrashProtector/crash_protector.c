@@ -1,8 +1,8 @@
 /*
- * WC3 CrashProtector - Prevents crashes from null pointer access (x64)
+ * WC3 CrashProtector - Prevents crashes from invalid pointer access (x64)
  *
  * Loads as a version.dll proxy into WC3 Reforged's process.
- * Installs a Vectored Exception Handler that catches null-page
+ * Installs a Vectored Exception Handler that catches
  * access violations, skips the faulting instruction, and logs the event.
  *
  * The .def file forwards all real version.dll exports by loading
@@ -114,16 +114,13 @@ static DWORD64* GetRegFromContext(CONTEXT* ctx, BYTE regIdx) {
 /*  Vectored Exception Handler                                        */
 /* ------------------------------------------------------------------ */
 
-static LONG CALLBACK NullAccessHandler(PEXCEPTION_POINTERS ep) {
+static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
 
     /* ExceptionInformation[0]: 0 = read, 1 = write, 8 = DEP */
     /* ExceptionInformation[1]: the address that was accessed  */
     ULONG_PTR accessType = ep->ExceptionRecord->ExceptionInformation[0];
     ULONG_PTR addr = ep->ExceptionRecord->ExceptionInformation[1];
-
-    // /* Only handle null-page accesses (first 64KB) */
-    // if (addr >= 0x10000) return EXCEPTION_CONTINUE_SEARCH;
 
     /* Decode the faulting instruction */
     BYTE* rip = (BYTE*)ep->ContextRecord->Rip;
@@ -270,13 +267,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         LogEvent("=== CrashProtector loaded (PID %lu) ===", GetCurrentProcessId());
 
         /* Install the exception handler (priority = first) */
-        if (AddVectoredExceptionHandler(1, NullAccessHandler)) {
+        if (AddVectoredExceptionHandler(1, InvalidAccessHandler)) {
             LogEvent("Vectored exception handler installed successfully");
         } else {
             LogEvent("ERROR: Failed to install exception handler!");
         }
 
-        LogEvent("Ready - monitoring for null pointer access violations");
+        LogEvent("Ready - monitoring for invalid pointer access violations");
     } else if (reason == DLL_PROCESS_DETACH) {
         LogEvent("=== CrashProtector unloading. Total crashes saved: %ld ===", g_crashesSaved);
         if (g_logFile != INVALID_HANDLE_VALUE) CloseHandle(g_logFile);
