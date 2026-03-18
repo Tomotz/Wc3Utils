@@ -35,6 +35,9 @@ typedef BOOL  (WINAPI *pfnStackWalk64)(DWORD, HANDLE, HANDLE, LPSTACKFRAME64,
               PGET_MODULE_BASE_ROUTINE64, PTRANSLATE_ADDRESS_ROUTINE64);
 typedef PVOID (WINAPI *pfnSymFunctionTableAccess64)(HANDLE, DWORD64);
 typedef DWORD64 (WINAPI *pfnSymGetModuleBase64)(HANDLE, DWORD64);
+typedef BOOL  (WINAPI *pfnSymSetContext)(HANDLE, PIMAGEHLP_STACK_FRAME, PIMAGEHLP_CONTEXT);
+typedef BOOL  (WINAPI *pfnSymEnumSymbols)(HANDLE, ULONG64, PCSTR,
+              PSYM_ENUMERATESYMBOLS_CALLBACK, PVOID);
 
 static HMODULE                       g_dbgHelp;
 static pfnSymInitialize              g_SymInitialize;
@@ -44,6 +47,8 @@ static pfnSymGetLineFromAddr64       g_SymGetLineFromAddr64;
 static pfnStackWalk64                g_StackWalk64;
 static pfnSymFunctionTableAccess64   g_SymFunctionTableAccess64;
 static pfnSymGetModuleBase64         g_SymGetModuleBase64;
+static pfnSymSetContext              g_SymSetContext;
+static pfnSymEnumSymbols             g_SymEnumSymbols;
 static BOOL                          g_hasSymbols = FALSE;
 
 /* Forward declaration – LogEvent is defined later with the async ring buffer */
@@ -60,6 +65,8 @@ static void InitSymbols(void) {
     g_StackWalk64              = (pfnStackWalk64)              GetProcAddress(g_dbgHelp, "StackWalk64");
     g_SymFunctionTableAccess64 = (pfnSymFunctionTableAccess64)GetProcAddress(g_dbgHelp, "SymFunctionTableAccess64");
     g_SymGetModuleBase64       = (pfnSymGetModuleBase64)      GetProcAddress(g_dbgHelp, "SymGetModuleBase64");
+    g_SymSetContext            = (pfnSymSetContext)            GetProcAddress(g_dbgHelp, "SymSetContext");
+    g_SymEnumSymbols           = (pfnSymEnumSymbols)           GetProcAddress(g_dbgHelp, "SymEnumSymbols");
 
     if (!g_SymInitialize || !g_StackWalk64 || !g_SymFunctionTableAccess64 || !g_SymGetModuleBase64) return;
 
@@ -84,6 +91,123 @@ static void InitSymbols(void) {
         if (g_SymFromAddr(hProc, probeAddr, &disp, sym))
             g_hasSymbols = TRUE;
     }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Parameter enumeration via SymSetContext + SymEnumSymbols            */
+/* ------------------------------------------------------------------ */
+
+/* CodeView register IDs for AMD64 (from cvconst.h / CV_HREG_e) */
+#define CV_AMD64_RAX  328
+#define CV_AMD64_RBX  329
+#define CV_AMD64_RCX  330
+#define CV_AMD64_RDX  331
+#define CV_AMD64_RSI  332
+#define CV_AMD64_RDI  333
+#define CV_AMD64_RBP  334
+#define CV_AMD64_RSP  335
+#define CV_AMD64_R8   336
+#define CV_AMD64_R9   337
+#define CV_AMD64_R10  338
+#define CV_AMD64_R11  339
+#define CV_AMD64_R12  340
+#define CV_AMD64_R13  341
+#define CV_AMD64_R14  342
+#define CV_AMD64_R15  343
+
+typedef struct {
+    CONTEXT* ctx;           /* register state for reading values */
+    HANDLE   hProc;
+    int      paramCount;    /* how many params we've printed so far */
+} EnumParamsCtx;
+
+/* Map a CodeView register ID to the value from the CONTEXT struct */
+static DWORD64 CvRegToValue(CONTEXT* ctx, ULONG cvReg) {
+    switch (cvReg) {
+        case CV_AMD64_RAX: return ctx->Rax;
+        case CV_AMD64_RBX: return ctx->Rbx;
+        case CV_AMD64_RCX: return ctx->Rcx;
+        case CV_AMD64_RDX: return ctx->Rdx;
+        case CV_AMD64_RSI: return ctx->Rsi;
+        case CV_AMD64_RDI: return ctx->Rdi;
+        case CV_AMD64_RBP: return ctx->Rbp;
+        case CV_AMD64_RSP: return ctx->Rsp;
+        case CV_AMD64_R8:  return ctx->R8;
+        case CV_AMD64_R9:  return ctx->R9;
+        case CV_AMD64_R10: return ctx->R10;
+        case CV_AMD64_R11: return ctx->R11;
+        case CV_AMD64_R12: return ctx->R12;
+        case CV_AMD64_R13: return ctx->R13;
+        case CV_AMD64_R14: return ctx->R14;
+        case CV_AMD64_R15: return ctx->R15;
+        default:           return 0;
+    }
+}
+
+/* Safe memory read — returns FALSE if the address is not readable */
+static BOOL SafeRead(HANDLE hProc, DWORD64 addr, void* out, SIZE_T size) {
+    SIZE_T bytesRead = 0;
+    return ReadProcessMemory(hProc, (LPCVOID)addr, out, size, &bytesRead)
+           && bytesRead == size;
+}
+
+static BOOL CALLBACK EnumParamsCallback(PSYMBOL_INFO sym, ULONG symSize, PVOID userCtx) {
+    (void)symSize;
+    EnumParamsCtx* ep = (EnumParamsCtx*)userCtx;
+
+    /* Only enumerate parameters, not all locals */
+    if (!(sym->Flags & SYMFLAG_PARAMETER)) return TRUE; /* continue enumeration */
+
+    if (ep->paramCount >= 16) return FALSE; /* enough params, stop */
+
+    DWORD64 value = 0;
+    BOOL    hasValue = FALSE;
+
+    if (sym->Flags & SYMFLAG_REGISTER) {
+        /* Value lives directly in a register */
+        value = CvRegToValue(ep->ctx, sym->Register);
+        hasValue = TRUE;
+    } else if (sym->Flags & SYMFLAG_REGREL) {
+        /* Value is at [register + offset] on the stack */
+        DWORD64 base = CvRegToValue(ep->ctx, sym->Register);
+        DWORD64 addr = base + (LONG64)sym->Address;
+        SIZE_T readSize = (sym->Size > 0 && sym->Size <= 8) ? sym->Size : 8;
+        hasValue = SafeRead(ep->hProc, addr, &value, readSize);
+    } else if (sym->Flags & SYMFLAG_FRAMEREL) {
+        /* Value is at [RBP + offset] */
+        DWORD64 addr = ep->ctx->Rbp + (LONG64)sym->Address;
+        SIZE_T readSize = (sym->Size > 0 && sym->Size <= 8) ? sym->Size : 8;
+        hasValue = SafeRead(ep->hProc, addr, &value, readSize);
+    }
+
+    if (hasValue)
+        LogEvent("         %s = 0x%llX (%lld)", sym->Name,
+                 (unsigned long long)value, (long long)value);
+    else
+        LogEvent("         %s = <unavailable>", sym->Name);
+
+    ep->paramCount++;
+    return TRUE; /* continue enumeration */
+}
+
+static void LogFrameParams(HANDLE hProc, CONTEXT* ctx, STACKFRAME64* frame) {
+    if (!g_SymSetContext || !g_SymEnumSymbols) return;
+
+    IMAGEHLP_STACK_FRAME imgFrame;
+    memset(&imgFrame, 0, sizeof(imgFrame));
+    imgFrame.InstructionOffset = frame->AddrPC.Offset;
+    imgFrame.FrameOffset       = frame->AddrFrame.Offset;
+    imgFrame.StackOffset       = frame->AddrStack.Offset;
+
+    if (!g_SymSetContext(hProc, &imgFrame, NULL)) return;
+
+    EnumParamsCtx ep;
+    ep.ctx        = ctx;
+    ep.hProc      = hProc;
+    ep.paramCount = 0;
+
+    /* Enumerate all symbols in this frame's scope, callback filters to params */
+    g_SymEnumSymbols(hProc, 0, "*", EnumParamsCallback, &ep);
 }
 
 static void LogStackTrace(CONTEXT* ctx) {
@@ -135,6 +259,9 @@ static void LogStackTrace(CONTEXT* ctx) {
         else
             LogEvent("  [%2d] 0x%016llX  %s+0x%llX", i, (unsigned long long)pc,
                      funcName, (unsigned long long)symDisp);
+
+        /* Log function parameters if available */
+        LogFrameParams(hProc, &ctxCopy, &frame);
     }
 }
 
