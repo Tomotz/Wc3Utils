@@ -1,37 +1,105 @@
-Here's what I built in PdbPorter/:
+PDB Porter
+==========
 
-  MatchFunctions.java — Ghidra headless script
+Ports debug symbols (function names, parameter names/types) from an old WC3
+binary that has a PDB to a new patched binary that doesn't.
 
-  Matches functions between old (with PDB) and new binaries using three phases:
+When WC3 gets a patch, the binary changes and the old PDB no longer applies.
+This tool matches functions between the two versions and creates a new PDB
+for the updated binary — including function parameter info so CrashProtector
+can log argument values in stack traces.
 
-  1. Exact bytes — SHA-256 of raw function bytes. Catches identical functions.
-  2. Mnemonic + operand count — Strips specific addresses/values, keeps instruction structure. Catches functions that differ only due to relocation.
-  3. Call graph propagation — If an unmatched function's callers/callees are already matched, use that relationship as a signature. Iterates until no new matches.
 
-  All phases require 1-to-1 uniqueness (both sides must have exactly one function with that hash) to avoid false positives.
+How it works
+------------
 
-  port_pdb.py — Python orchestrator
+1. Ghidra imports both binaries and auto-analyzes them. The old binary's PDB
+   is loaded automatically (Ghidra picks it up if it sits next to the .exe).
 
-  Handles the full pipeline:
+2. MatchFunctions.java matches functions between old and new using three phases:
+   - Exact byte hash (SHA-256 of raw function bytes)
+   - Mnemonic hash (instruction structure without specific addresses)
+   - Call graph propagation (if callers/callees already matched, infer the rest)
+   All matches require 1-to-1 uniqueness to avoid false positives.
+   For minor version bumps, phases 1+2 typically catch 80-90%+ of functions.
 
-  python port_pdb.py old_wc3.exe new_wc3.exe -o symbols.txt
+3. For each matched function, the script exports the function name, RVA, code
+   size, and parameter info (names, types, storage locations) from the old PDB.
 
-  Steps:
-  1. Imports old binary into Ghidra project folder /old/ (auto-loads PDB if next to binary)
-  2. Imports new binary into /new/ (folder separation avoids name collisions)
-  3. Runs MatchFunctions.java to produce a name\tRVA symbol map
+4. pdb_writer.exe reads this symbol map and creates a PDB using mspdb140.dll.
+   Each function gets S_GPROC32 + parameter records (S_REGREL32 / S_REGISTER)
+   + a public symbol entry, so both SymFromAddr and SymEnumSymbols work.
 
-  For actual PDB generation, the output is compatible with gix/PdbGen:
-  # With PdbGen:
-  python port_pdb.py old.exe new.exe -o new.pdb --pdbgen /path/to/PdbGen
 
-  # Or generate the map first, then convert:
-  PdbGen new_wc3.exe symbols.txt new_wc3.pdb
+Prerequisites
+-------------
 
-  Requirements
+- Ghidra installed, with GHIDRA_HOME environment variable set
+- PDB file for the old binary, placed next to it with matching base name
+  (e.g. Warcraft III.pdb next to Warcraft III.exe)
+- Visual Studio (for building pdb_writer.exe)
 
-  - Ghidra installed, GHIDRA_HOME env var set
-  - PDB file placed next to the old binary with matching name
-  - For PDB output: PdbGen (uses LLVM to create minimal PDBs with public symbols — exactly what SymFromAddr needs)
 
-  For minor WC3 version bumps, phases 1+2 alone should catch 80-90%+ of functions, with the call graph phase filling in more.
+Building pdb_writer.exe
+-----------------------
+
+Open a "x64 Native Tools Command Prompt for VS" and run:
+
+    cd PdbPorter
+    build_pdb_writer.bat
+
+This compiles pdb_writer.cpp with MSVC. The resulting exe dynamically loads
+mspdb140.dll at runtime (which is on the PATH inside a VS command prompt).
+
+
+Full pipeline (one command)
+---------------------------
+
+    python port_pdb.py old_wc3.exe new_wc3.exe -o new_wc3.pdb --pdb-writer ./pdb_writer.exe
+
+This does everything: Ghidra analysis, function matching, and PDB creation.
+
+
+Step by step
+------------
+
+1. Generate the symbol map only:
+
+    python port_pdb.py old_wc3.exe new_wc3.exe -o symbols.txt
+
+2. Inspect symbols.txt to verify the matches look correct.
+
+3. Create the PDB from the symbol map:
+
+    pdb_writer.exe new_wc3.exe symbols.txt new_wc3.pdb
+
+4. Place new_wc3.pdb next to the game executable.
+
+CrashProtector sets SYMOPT_LOAD_ANYTHING so it loads the PDB regardless of
+GUID mismatch (since we're generating a fresh PDB, not the one the PE expects).
+
+
+Symbol map format
+-----------------
+
+    FUNC	FunctionName	12345	200	3
+    PARAM	this	SomeClass *	REG:RCX
+    PARAM	count	int	REG:RDX
+    PARAM	buffer	char *	STACK:40
+
+    FUNC	AnotherFunction	67890	150	0
+
+FUNC fields: name, RVA (decimal), code size (bytes), parameter count.
+PARAM fields: name, type, storage (REG:register or STACK:offset).
+
+The old name<TAB>RVA format (without FUNC prefix) is also accepted for
+backward compatibility with PdbGen.
+
+
+Files
+-----
+
+port_pdb.py          Python orchestrator — runs Ghidra and optionally pdb_writer
+MatchFunctions.java  Ghidra headless script — matches functions, exports symbol map
+pdb_writer.cpp       Creates PDB with function + parameter symbols via mspdb140.dll
+build_pdb_writer.bat Compiles pdb_writer.cpp with MSVC

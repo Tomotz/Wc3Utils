@@ -70,6 +70,17 @@ static void InitSymbols(void) {
 
     if (!g_SymInitialize || !g_StackWalk64 || !g_SymFunctionTableAccess64 || !g_SymGetModuleBase64) return;
 
+    /* Allow loading PDBs even when GUID doesn't match the PE
+       (our generated PDBs may have a different GUID) */
+    typedef DWORD (WINAPI *pfnSymSetOptions)(DWORD);
+    pfnSymSetOptions setOpts = (pfnSymSetOptions)GetProcAddress(g_dbgHelp, "SymSetOptions");
+    if (setOpts) {
+        typedef DWORD (WINAPI *pfnSymGetOptions)(void);
+        pfnSymGetOptions getOpts = (pfnSymGetOptions)GetProcAddress(g_dbgHelp, "SymGetOptions");
+        DWORD opts = getOpts ? getOpts() : 0;
+        setOpts(opts | 0x00000040 /* SYMOPT_LOAD_ANYTHING */);
+    }
+
     HANDLE hProc = GetCurrentProcess();
     if (!g_SymInitialize(hProc, NULL, TRUE)) return;
 

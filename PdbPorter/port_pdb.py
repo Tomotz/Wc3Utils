@@ -73,8 +73,10 @@ def main():
                         help="Output file (symbol map, or .pdb if --pdbgen is set)")
     parser.add_argument("--ghidra-home", default=os.environ.get("GHIDRA_HOME"),
                         help="Ghidra installation directory (default: $GHIDRA_HOME)")
+    parser.add_argument("--pdb-writer", default=None,
+                        help="Path to pdb_writer executable (creates PDB with parameter info)")
     parser.add_argument("--pdbgen", default=None,
-                        help="Path to PdbGen executable for direct PDB output")
+                        help="Path to PdbGen executable (creates PDB with public symbols only)")
     parser.add_argument("--keep-project", action="store_true",
                         help="Keep the Ghidra project directory for debugging")
     parser.add_argument("--timeout", type=int, default=3600,
@@ -143,16 +145,21 @@ def main():
         print(f"\nResult: {len(data_lines)} named symbols ported to new binary")
 
         # Output
-        if args.pdbgen:
-            print(f"Generating PDB with PdbGen...")
+        if args.pdb_writer:
+            print(f"Generating PDB with pdb_writer (with parameter info)...")
+            subprocess.run([args.pdb_writer, new_binary, symbols_file, output], check=True)
+            print(f"PDB written to: {output}")
+        elif args.pdbgen:
+            print(f"Generating PDB with PdbGen (public symbols only, no parameter info)...")
             subprocess.run([args.pdbgen, new_binary, symbols_file, output], check=True)
             print(f"PDB written to: {output}")
         else:
             shutil.copy2(symbols_file, output)
             print(f"Symbol map written to: {output}")
-            print(f"\nTo generate a PDB from this map, use PdbGen:")
+            print(f"\nTo generate a PDB with parameter info:")
+            print(f"  pdb_writer {os.path.basename(new_binary)} {os.path.basename(output)} output.pdb")
+            print(f"\nOr for public symbols only (PdbGen):")
             print(f"  PdbGen {os.path.basename(new_binary)} {os.path.basename(output)} output.pdb")
-            print(f"  (https://github.com/gix/PdbGen)")
 
     finally:
         if args.keep_project:
