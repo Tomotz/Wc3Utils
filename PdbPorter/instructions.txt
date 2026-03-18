@@ -1,0 +1,37 @@
+Here's what I built in PdbPorter/:
+
+  MatchFunctions.java — Ghidra headless script
+
+  Matches functions between old (with PDB) and new binaries using three phases:
+
+  1. Exact bytes — SHA-256 of raw function bytes. Catches identical functions.
+  2. Mnemonic + operand count — Strips specific addresses/values, keeps instruction structure. Catches functions that differ only due to relocation.
+  3. Call graph propagation — If an unmatched function's callers/callees are already matched, use that relationship as a signature. Iterates until no new matches.
+
+  All phases require 1-to-1 uniqueness (both sides must have exactly one function with that hash) to avoid false positives.
+
+  port_pdb.py — Python orchestrator
+
+  Handles the full pipeline:
+
+  python port_pdb.py old_wc3.exe new_wc3.exe -o symbols.txt
+
+  Steps:
+  1. Imports old binary into Ghidra project folder /old/ (auto-loads PDB if next to binary)
+  2. Imports new binary into /new/ (folder separation avoids name collisions)
+  3. Runs MatchFunctions.java to produce a name\tRVA symbol map
+
+  For actual PDB generation, the output is compatible with gix/PdbGen:
+  # With PdbGen:
+  python port_pdb.py old.exe new.exe -o new.pdb --pdbgen /path/to/PdbGen
+
+  # Or generate the map first, then convert:
+  PdbGen new_wc3.exe symbols.txt new_wc3.pdb
+
+  Requirements
+
+  - Ghidra installed, GHIDRA_HOME env var set
+  - PDB file placed next to the old binary with matching name
+  - For PDB output: PdbGen (uses LLVM to create minimal PDBs with public symbols — exactly what SymFromAddr needs)
+
+  For minor WC3 version bumps, phases 1+2 alone should catch 80-90%+ of functions, with the call graph phase filling in more.
