@@ -103,7 +103,7 @@ static void LogStackTrace(CONTEXT* ctx) {
     frame.AddrStack.Offset = ctxCopy.Rsp;
     frame.AddrStack.Mode   = AddrModeFlat;
 
-    LogEvent("  --- Stack Trace ---");
+    LogEvent("  --- Stack Trace (Newest first) ---");
 
     for (int i = 0; i < 64; i++) {
         if (!g_StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProc, hThread, &frame,
