@@ -107,7 +107,16 @@ def main():
 
     # We import both binaries into separate Ghidra project folders (/old and /new)
     # to avoid name collisions when the filenames are identical.
-    tmpdir = tempfile.mkdtemp(prefix="pdb_porter_")
+    # Use a temp dir without spaces.  Ghidra's analyzeHeadless is a batch
+    # script that can mangle paths containing spaces even when quoted.
+    default_tmp = tempfile.gettempdir()
+    if " " in default_tmp and platform.system() == "Windows":
+        # Fall back to a space-free location
+        safe_tmp = os.path.join(os.environ.get("SystemDrive", "C:"), os.sep, "Temp")
+        os.makedirs(safe_tmp, exist_ok=True)
+        tmpdir = tempfile.mkdtemp(prefix="pdb_porter_", dir=safe_tmp)
+    else:
+        tmpdir = tempfile.mkdtemp(prefix="pdb_porter_")
     project_name = "SymbolPort"
     symbols_file = os.path.join(tmpdir, "symbols.txt")
     old_name = os.path.basename(old_binary)
@@ -127,12 +136,16 @@ def main():
                    timeout=args.timeout)
 
         # Step 3 – match functions
+        # Ghidra's analyzeHeadless re-splits script arguments on whitespace,
+        # which breaks paths containing spaces.  We join our two args with
+        # a pipe delimiter and split on it inside MatchFunctions.java.
         src_project_path = f"/old/{old_name}"
+        script_args = f"{src_project_path}|{symbols_file}"
         print(f"\n[3/3] Matching functions (source: {src_project_path})")
         run_ghidra(analyze, tmpdir, f"{project_name}/new",
                    "-process", new_name,
                    "-noanalysis",
-                   "-postScript", "MatchFunctions.java", src_project_path, symbols_file,
+                   "-postScript", "MatchFunctions.java", script_args,
                    "-scriptPath", script_dir,
                    timeout=args.timeout)
 

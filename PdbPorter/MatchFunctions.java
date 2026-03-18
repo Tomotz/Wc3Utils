@@ -47,14 +47,23 @@ public class MatchFunctions extends GhidraScript {
     @Override
     public void run() throws Exception {
         String[] args = getScriptArgs();
-        if (args.length < 2) {
-            printerr("Usage: MatchFunctions.java <src_project_path> <output_file>");
+
+        // port_pdb.py passes both args joined with "|" to avoid Ghidra's
+        // analyzeHeadless splitting paths that contain spaces.
+        String srcProjectPath, outputPath;
+        if (args.length == 1 && args[0].contains("|")) {
+            String[] parts = args[0].split("\\|", 2);
+            srcProjectPath = parts[0];
+            outputPath = parts[1];
+        } else if (args.length >= 2) {
+            srcProjectPath = args[0];
+            outputPath = args[1];
+        } else {
+            printerr("Usage: MatchFunctions.java <src_project_path>|<output_file>");
+            printerr("  or:  MatchFunctions.java <src_project_path> <output_file>");
             printerr("  src_project_path: e.g. /old/binary.exe");
             return;
         }
-
-        String srcProjectPath = args[0];
-        String outputPath = args[1];
 
         DomainFile srcFile = state.getProject().getProjectData().getFile(srcProjectPath);
         if (srcFile == null) {
