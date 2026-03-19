@@ -129,7 +129,9 @@ static void InitSymbols(void) {
 typedef struct {
     CONTEXT* ctx;           /* register state for reading values */
     HANDLE   hProc;
-    int      paramCount;    /* how many params we've printed so far */
+    int      paramCount;    /* how many params we've collected so far */
+    char     buf[1000];      /* accumulated "name=0xval, name=0xval, ..." */
+    int      bufPos;
 } EnumParamsCtx;
 
 /* Map a CodeView register ID to the value from the CONTEXT struct */
@@ -175,33 +177,46 @@ static BOOL CALLBACK EnumParamsCallback(PSYMBOL_INFO sym, ULONG symSize, PVOID u
     BOOL    hasValue = FALSE;
 
     if (sym->Flags & SYMFLAG_REGISTER) {
-        /* Value lives directly in a register */
         value = CvRegToValue(ep->ctx, sym->Register);
         hasValue = TRUE;
     } else if (sym->Flags & SYMFLAG_REGREL) {
-        /* Value is at [register + offset] on the stack */
         DWORD64 base = CvRegToValue(ep->ctx, sym->Register);
         DWORD64 addr = base + (LONG64)sym->Address;
         SIZE_T readSize = (sym->Size > 0 && sym->Size <= 8) ? sym->Size : 8;
         hasValue = SafeRead(ep->hProc, addr, &value, readSize);
     } else if (sym->Flags & SYMFLAG_FRAMEREL) {
-        /* Value is at [RBP + offset] */
         DWORD64 addr = ep->ctx->Rbp + (LONG64)sym->Address;
         SIZE_T readSize = (sym->Size > 0 && sym->Size <= 8) ? sym->Size : 8;
         hasValue = SafeRead(ep->hProc, addr, &value, readSize);
     }
 
-    if (hasValue)
-        LogEvent("         %s = 0x%llX (%lld)", sym->Name,
-                 (unsigned long long)value, (long long)value);
+    /* Append "name=0xvalue" or "name=?" to the buffer */
+    int remaining = (int)sizeof(ep->buf) - ep->bufPos;
+    if (remaining <= 1) return FALSE;
+
+    int n;
+    if (ep->paramCount > 0)
+        n = sprintf_s(ep->buf + ep->bufPos, remaining, ", ");
     else
-        LogEvent("         %s = <unavailable>", sym->Name);
+        n = 0;
+    ep->bufPos += (n > 0) ? n : 0;
+    remaining = (int)sizeof(ep->buf) - ep->bufPos;
+
+    if (hasValue)
+        n = sprintf_s(ep->buf + ep->bufPos, remaining, "%s=0x%llx",
+                      sym->Name, (unsigned long long)value);
+    else
+        n = sprintf_s(ep->buf + ep->bufPos, remaining, "%s=?", sym->Name);
+    ep->bufPos += (n > 0) ? n : 0;
 
     ep->paramCount++;
     return TRUE; /* continue enumeration */
 }
 
-static void LogFrameParams(HANDLE hProc, CONTEXT* ctx, STACKFRAME64* frame) {
+/* Collect frame params into outBuf as "name=0xval, name=0xval, ..." */
+static void CollectFrameParams(HANDLE hProc, CONTEXT* ctx, STACKFRAME64* frame,
+                               char* outBuf, int outBufSize) {
+    outBuf[0] = '\0';
     if (!g_SymSetContext || !g_SymEnumSymbols) return;
 
     IMAGEHLP_STACK_FRAME imgFrame;
@@ -216,9 +231,13 @@ static void LogFrameParams(HANDLE hProc, CONTEXT* ctx, STACKFRAME64* frame) {
     ep.ctx        = ctx;
     ep.hProc      = hProc;
     ep.paramCount = 0;
+    ep.buf[0]     = '\0';
+    ep.bufPos     = 0;
 
-    /* Enumerate all symbols in this frame's scope, callback filters to params */
     g_SymEnumSymbols(hProc, 0, "*", EnumParamsCallback, &ep);
+
+    if (ep.bufPos > 0 && ep.bufPos < outBufSize)
+        memcpy(outBuf, ep.buf, ep.bufPos + 1);
 }
 
 static void LogStackTrace(CONTEXT* ctx) {
@@ -260,19 +279,20 @@ static void LogStackTrace(CONTEXT* ctx) {
         if (g_SymFromAddr && g_SymFromAddr(hProc, pc, &symDisp, sym))
             funcName = sym->Name;
 
-        /* Resolve source file + line */
+        /* Collect function parameters */
+        char paramsBuf[400] = "";
+        CollectFrameParams(hProc, &ctxCopy, &frame, paramsBuf, sizeof(paramsBuf));
+
+        /* Resolve source file + line, output in gdb format */
         IMAGEHLP_LINE64 line;
         line.SizeOfStruct = sizeof(line);
         DWORD lineDisp = 0;
         if (g_SymGetLineFromAddr64 && g_SymGetLineFromAddr64(hProc, pc, &lineDisp, &line))
-            LogEvent("  [%2d] 0x%016llX  %s+0x%llX  (%s:%lu)", i, (unsigned long long)pc,
-                     funcName, (unsigned long long)symDisp, line.FileName, line.LineNumber);
+            LogEvent("  #0x%x  0x%llx in %s (%s) at %s:0x%lx", i, (unsigned long long)pc,
+                     funcName, paramsBuf, line.FileName, line.LineNumber);
         else
-            LogEvent("  [%2d] 0x%016llX  %s+0x%llX", i, (unsigned long long)pc,
-                     funcName, (unsigned long long)symDisp);
-
-        /* Log function parameters if available */
-        LogFrameParams(hProc, &ctxCopy, &frame);
+            LogEvent("  #0x%x  0x%llx in %s (%s)", i, (unsigned long long)pc,
+                     funcName, paramsBuf);
     }
 }
 
