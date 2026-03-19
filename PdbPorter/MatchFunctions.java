@@ -48,11 +48,12 @@ public class MatchFunctions extends GhidraScript {
     public void run() throws Exception {
         String[] args = getScriptArgs();
 
-        // port_pdb.py passes both args joined with "|" to avoid Ghidra's
+        // port_pdb.py passes both args joined with "::" to avoid Ghidra's
         // analyzeHeadless splitting paths that contain spaces.
+        // ("|" is unsafe on Windows — cmd.exe interprets it as a pipe.)
         String srcProjectPath, outputPath;
-        if (args.length == 1 && args[0].contains("|")) {
-            String[] parts = args[0].split("\\|", 2);
+        if (args.length == 1 && args[0].contains("::")) {
+            String[] parts = args[0].split("::", 2);
             srcProjectPath = parts[0];
             outputPath = parts[1];
         } else if (args.length >= 2) {

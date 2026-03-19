@@ -11,6 +11,7 @@ Requirements:
 
 Usage:
     python port_pdb.py old.exe new.exe -o symbols.txt
+    python port_pdb.py old.exe new.exe -o symbols.txt --step 3
     python port_pdb.py old.exe new.exe -o new.pdb --pdbgen /path/to/PdbGen
 """
 
@@ -33,24 +34,45 @@ def find_analyze_headless(ghidra_home):
 
 def run_ghidra(cmd, project_dir, project_folder, *extra, timeout=3600):
     args = [cmd, project_dir, project_folder] + list(extra)
-    print(f"  $ {' '.join(os.path.basename(a) if os.sep in a else a for a in args)}")
-    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    print(f"  $ {' '.join(os.path.basename(a) if os.sep in a else a for a in args)}", flush=True)
 
-    # Always show Ghidra script output (lines starting with ">")
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        # analyzeHeadless prefixes script println with the script name
-        if "MatchFunctions.java>" in line or "INFO  SCRIPT" in line:
-            print(f"    {stripped}")
+    # Stream output so the user can see Ghidra's progress in real time.
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, bufsize=1)
+    stdout_lines = []
+    try:
+        for line in proc.stdout:
+            stdout_lines.append(line)
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Show progress-relevant lines, skip noisy warnings/diagnostics
+            if "MatchFunctions.java>" in line:
+                print(f"    {stripped}", flush=True)
+            elif any(k in line for k in (
+                "INFO  ANALYZING", "INFO  IMPORTING", "INFO  REPORT",
+                "INFO  SCRIPT", "PDB analyzer pars", "Using Loader",
+                "Using Language", "% of", "resolveCount",
+                "conflictCount", "Headless startup complete",
+                "HEADLESS: execution", "AutoAnalysis",
+            )):
+                print(f"    {stripped}", flush=True)
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        sys.exit(f"Ghidra timed out after {timeout}s")
 
-    if result.returncode != 0:
-        print("\n--- Ghidra stdout (last 3000 chars) ---")
-        print(result.stdout[-3000:])
+    if proc.returncode != 0:
+        stderr = proc.stderr.read()
+        stdout_tail = "".join(stdout_lines[-100:])
+        print("\n--- Ghidra stdout (last lines) ---")
+        print(stdout_tail[-3000:])
         print("\n--- Ghidra stderr (last 3000 chars) ---")
-        print(result.stderr[-3000:])
-        sys.exit(f"Ghidra failed (exit code {result.returncode})")
+        print(stderr[-3000:])
+        sys.exit(f"Ghidra failed (exit code {proc.returncode})")
 
-    return result
+    return proc
 
 
 def find_pdb_next_to(binary_path):
@@ -61,6 +83,12 @@ def find_pdb_next_to(binary_path):
         if os.path.isfile(p):
             return p
     return None
+
+
+def get_project_dir(work_dir):
+    """Get or create a stable project directory under work_dir."""
+    os.makedirs(work_dir, exist_ok=True)
+    return work_dir
 
 
 def main():
@@ -77,8 +105,12 @@ def main():
                         help="Path to pdb_writer executable (creates PDB with parameter info)")
     parser.add_argument("--pdbgen", default=None,
                         help="Path to PdbGen executable (creates PDB with public symbols only)")
-    parser.add_argument("--keep-project", action="store_true",
-                        help="Keep the Ghidra project directory for debugging")
+    parser.add_argument("--work-dir", default=None,
+                        help="Directory for Ghidra project files (default: auto in script dir). "
+                             "Reuse to skip already-completed import steps.")
+    parser.add_argument("--step", type=int, choices=[1, 2, 3], default=None,
+                        help="Run only this step: 1=import old, 2=import new, 3=match. "
+                             "Requires --work-dir for steps 2 and 3.")
     parser.add_argument("--timeout", type=int, default=3600,
                         help="Timeout per Ghidra step in seconds (default: 3600)")
     args = parser.parse_args()
@@ -105,44 +137,62 @@ def main():
         print(f"WARNING: No PDB found next to {old_binary}")
         print(f"  Ghidra may not be able to load symbols for the old binary.")
 
-    # We import both binaries into separate Ghidra project folders (/old and /new)
-    # to avoid name collisions when the filenames are identical.
-    # Use a temp dir without spaces.  Ghidra's analyzeHeadless is a batch
-    # script that can mangle paths containing spaces even when quoted.
-    default_tmp = tempfile.gettempdir()
-    if " " in default_tmp and platform.system() == "Windows":
-        # Fall back to a space-free location
-        safe_tmp = os.path.join(os.environ.get("SystemDrive", "C:"), os.sep, "Temp")
-        os.makedirs(safe_tmp, exist_ok=True)
-        tmpdir = tempfile.mkdtemp(prefix="pdb_porter_", dir=safe_tmp)
+    # Project directory — reusable across runs.
+    if args.work_dir:
+        work_dir = os.path.abspath(args.work_dir)
     else:
-        tmpdir = tempfile.mkdtemp(prefix="pdb_porter_")
+        # Default: ghidra_project/ next to the script
+        work_dir = os.path.join(script_dir, "ghidra_project")
+    os.makedirs(work_dir, exist_ok=True)
+
     project_name = "SymbolPort"
-    symbols_file = os.path.join(tmpdir, "symbols.txt")
+    symbols_file = os.path.join(work_dir, "symbols.txt")
     old_name = os.path.basename(old_binary)
     new_name = os.path.basename(new_binary)
 
-    try:
+    steps = [args.step] if args.step else [1, 2, 3]
+
+    # Check that earlier steps completed if starting from a later step
+    old_project = os.path.join(work_dir, project_name, "old")
+    new_project = os.path.join(work_dir, project_name, "new")
+    if 2 in steps and 1 not in steps and not os.path.isdir(old_project):
+        sys.exit(f"Step 1 not completed: {old_project} not found. Run step 1 first.")
+    if 3 in steps and 2 not in steps and not os.path.isdir(new_project):
+        sys.exit(f"Step 2 not completed: {new_project} not found. Run step 2 first.")
+
+    if 1 in steps:
         # Step 1 – import and auto-analyze old binary (Ghidra loads PDB if found)
+        # A preScript disables expensive analyzers (decompiler, strings, etc.)
+        # so only function boundaries + PDB symbols are processed.
         print(f"\n[1/3] Importing old binary: {old_name}")
-        run_ghidra(analyze, tmpdir, f"{project_name}/old",
+        run_ghidra(analyze, work_dir, f"{project_name}/old",
                    "-import", old_binary,
+                   "-preScript", "ConfigureAnalysis.java",
+                   "-scriptPath", script_dir,
+                   "-analysisTimeoutPerFile", str(args.timeout),
                    timeout=args.timeout)
+        print(f"  Step 1 complete. Project saved in: {work_dir}")
 
-        # Step 2 – import and auto-analyze new binary
+    if 2 in steps:
+        # Step 2 – import and auto-analyze new binary.
         print(f"\n[2/3] Importing new binary: {new_name}")
-        run_ghidra(analyze, tmpdir, f"{project_name}/new",
+        run_ghidra(analyze, work_dir, f"{project_name}/new",
                    "-import", new_binary,
+                   "-preScript", "ConfigureAnalysis.java",
+                   "-scriptPath", script_dir,
+                   "-analysisTimeoutPerFile", str(args.timeout),
                    timeout=args.timeout)
+        print(f"  Step 2 complete. Project saved in: {work_dir}")
 
+    if 3 in steps:
         # Step 3 – match functions
         # Ghidra's analyzeHeadless re-splits script arguments on whitespace,
         # which breaks paths containing spaces.  We join our two args with
-        # a pipe delimiter and split on it inside MatchFunctions.java.
+        # a "::" delimiter (pipe is unsafe on Windows batch scripts).
         src_project_path = f"/old/{old_name}"
-        script_args = f"{src_project_path}|{symbols_file}"
+        script_args = f"{src_project_path}::{symbols_file}"
         print(f"\n[3/3] Matching functions (source: {src_project_path})")
-        run_ghidra(analyze, tmpdir, f"{project_name}/new",
+        run_ghidra(analyze, work_dir, f"{project_name}/new",
                    "-process", new_name,
                    "-noanalysis",
                    "-postScript", "MatchFunctions.java", script_args,
@@ -174,11 +224,7 @@ def main():
             print(f"\nOr for public symbols only (PdbGen):")
             print(f"  PdbGen {os.path.basename(new_binary)} {os.path.basename(output)} output.pdb")
 
-    finally:
-        if args.keep_project:
-            print(f"\nGhidra project kept at: {tmpdir}")
-        else:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+    print(f"\nGhidra project kept at: {work_dir}")
 
 
 if __name__ == "__main__":
