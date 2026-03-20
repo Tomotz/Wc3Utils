@@ -1,5 +1,6 @@
-// Pre-script to disable expensive analyzers for fast function-boundary-only analysis.
-// Run as -preScript before import to speed up headless analysis.
+// Pre-script to disable only the most expensive analyzer (Decompiler Parameter ID)
+// which runs full decompilation on every function. We don't need it — parameter info
+// comes from the PDB, and Version Tracking doesn't use decompiler output.
 //@category Configuration
 
 import ghidra.app.script.GhidraScript;
@@ -7,30 +8,8 @@ import ghidra.framework.options.Options;
 
 public class ConfigureAnalysis extends GhidraScript {
 
-    // Analyzers to disable. We keep: PDB Universal (loads symbols/params from PDB),
-    // Disassemble Entry Points, Create Function, Subroutine References,
-    // Call-Fixup Installer, Call Convention ID, Non-Returning Functions (both),
-    // and External Entry References.
     private static final String[] DISABLE = {
-        "ASCII Strings",
-        "Apply Data Archives",
-        "Create Address Tables",
-        "Data Reference",
         "Decompiler Parameter ID",
-        "Decompiler Switch Analysis",
-        "Demangler Microsoft",
-        "Embedded Media",
-        "Function ID",
-        "Function Start Search",
-        "Reference",
-        "Scalar Operand References",
-        "Shared Return Calls",
-        "Stack",
-        "Windows x86 PE Exception Handling",
-        "Windows x86 PE RTTI Analyzer",
-        "Windows x86 Thread Environment Block (TEB) Analyzer",
-        "WindowsResourceReference",
-        "x86 Constant Reference Analyzer",
     };
 
     @Override

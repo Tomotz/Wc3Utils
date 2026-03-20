@@ -86,6 +86,29 @@ public class MatchFunctions extends GhidraScript {
             println(String.format("Source: %d functions (%d named), Destination: %d functions",
                                   srcFuncs.size(), namedCount, dstFuncs.size()));
 
+            // Debug: show hash stats
+            int srcBytesOk = 0, srcMnemOk = 0, dstBytesOk = 0, dstMnemOk = 0;
+            Set<String> srcByteHashes = new HashSet<>(), dstByteHashes = new HashSet<>();
+            Set<String> srcMnemHashes = new HashSet<>(), dstMnemHashes = new HashSet<>();
+            for (Function f : srcFuncs) {
+                String bh = hashBytes(srcProg, f);
+                String mh = hashMnemonics(srcProg, f);
+                if (bh != null) { srcBytesOk++; srcByteHashes.add(bh); }
+                if (mh != null) { srcMnemOk++; srcMnemHashes.add(mh); }
+            }
+            for (Function f : dstFuncs) {
+                String bh = hashBytes(dstProg, f);
+                String mh = hashMnemonics(dstProg, f);
+                if (bh != null) { dstBytesOk++; dstByteHashes.add(bh); }
+                if (mh != null) { dstMnemOk++; dstMnemHashes.add(mh); }
+            }
+            srcByteHashes.retainAll(dstByteHashes);
+            srcMnemHashes.retainAll(dstMnemHashes);
+            println(String.format("Debug: src hashable: %d bytes, %d mnem; dst hashable: %d bytes, %d mnem",
+                                  srcBytesOk, srcMnemOk, dstBytesOk, dstMnemOk));
+            println(String.format("Debug: overlapping hashes: %d bytes, %d mnem",
+                                  srcByteHashes.size(), srcMnemHashes.size()));
+
             // Phase 1 – exact byte match
             int before = matchNames.size();
             matchByHash(srcProg, dstProg, srcFuncs, dstFuncs, true);

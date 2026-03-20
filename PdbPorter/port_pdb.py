@@ -36,9 +36,15 @@ def run_ghidra(cmd, project_dir, project_folder, *extra, timeout=3600):
     args = [cmd, project_dir, project_folder] + list(extra)
     print(f"  $ {' '.join(os.path.basename(a) if os.sep in a else a for a in args)}", flush=True)
 
+    # Disable MSYS/Git-Bash path conversion — it mangles Ghidra project paths
+    # like "/old/binary.exe" into "D:/Program Files/Git/old/binary.exe".
+    env = os.environ.copy()
+    env["MSYS_NO_PATHCONV"] = "1"
+    env["MSYS2_ARG_CONV_EXCL"] = "*"
+
     # Stream output so the user can see Ghidra's progress in real time.
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, bufsize=1)
+                            text=True, bufsize=1, env=env)
     stdout_lines = []
     try:
         for line in proc.stdout:
@@ -47,7 +53,9 @@ def run_ghidra(cmd, project_dir, project_folder, *extra, timeout=3600):
             if not stripped:
                 continue
             # Show progress-relevant lines, skip noisy warnings/diagnostics
-            if "MatchFunctions.java>" in line:
+            if "ERROR" in line:
+                print(f"    {stripped}", flush=True)
+            elif "MatchFunctions.java>" in line or "RunVersionTracking.java>" in line:
                 print(f"    {stripped}", flush=True)
             elif any(k in line for k in (
                 "INFO  ANALYZING", "INFO  IMPORTING", "INFO  REPORT",
@@ -152,13 +160,11 @@ def main():
 
     steps = [args.step] if args.step else [1, 2, 3]
 
-    # Check that earlier steps completed if starting from a later step
-    old_project = os.path.join(work_dir, project_name, "old")
-    new_project = os.path.join(work_dir, project_name, "new")
-    if 2 in steps and 1 not in steps and not os.path.isdir(old_project):
-        sys.exit(f"Step 1 not completed: {old_project} not found. Run step 1 first.")
-    if 3 in steps and 2 not in steps and not os.path.isdir(new_project):
-        sys.exit(f"Step 2 not completed: {new_project} not found. Run step 2 first.")
+    # Check that the Ghidra project exists if skipping earlier steps
+    ghidra_project_file = os.path.join(work_dir, f"{project_name}.gpr")
+    if args.step and args.step > 1 and not os.path.isfile(ghidra_project_file):
+        sys.exit(f"Ghidra project not found: {ghidra_project_file}\n"
+                 f"Run earlier steps first (or run without --step for all steps).")
 
     if 1 in steps:
         # Step 1 – import and auto-analyze old binary (Ghidra loads PDB if found)
@@ -185,13 +191,12 @@ def main():
         print(f"  Step 2 complete. Project saved in: {work_dir}")
 
     if 3 in steps:
-        # Step 3 – match functions
-        # Ghidra's analyzeHeadless re-splits script arguments on whitespace,
-        # which breaks paths containing spaces.  We join our two args with
-        # a "::" delimiter (pipe is unsafe on Windows batch scripts).
+        # Step 3 – match functions between old and new binaries.
+        # Uses byte hashing, mnemonic hashing, and call-graph propagation.
         src_project_path = f"/old/{old_name}"
         script_args = f"{src_project_path}::{symbols_file}"
-        print(f"\n[3/3] Matching functions (source: {src_project_path})")
+
+        print(f"\n[3/3] Matching functions")
         run_ghidra(analyze, work_dir, f"{project_name}/new",
                    "-process", new_name,
                    "-noanalysis",
@@ -200,7 +205,7 @@ def main():
                    timeout=args.timeout)
 
         if not os.path.isfile(symbols_file):
-            sys.exit("MatchFunctions.java did not produce output. Check Ghidra logs above.")
+            sys.exit("MatchFunctions did not produce output. Check Ghidra logs above.")
 
         # Count results
         with open(symbols_file) as f:
