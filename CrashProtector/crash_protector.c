@@ -16,6 +16,7 @@
 #include "hde64.h"
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 
 #pragma comment(lib, "Shell32.lib")
 
@@ -318,8 +319,10 @@ void ShowBalloon(const char* title, const char* message)
 /* ------------------------------------------------------------------ */
 
 static HANDLE g_logFile = INVALID_HANDLE_VALUE;
+static HANDLE g_logFileArchive = INVALID_HANDLE_VALUE;
+static char g_archivePath[MAX_PATH];
 static volatile LONG g_crashesSaved = 0;
-static char cwd[MAX_PATH];
+static char g_logDir[MAX_PATH];
 
 /* Lock-free ring buffer for async log writes */
 #define LOG_RING_SIZE 256          /* must be power of 2 */
@@ -332,39 +335,61 @@ static HANDLE g_logEvent = NULL;     /* signals writer thread */
 static HANDLE g_logThread = NULL;
 static volatile LONG g_logShutdown = 0;
 
+/* Open the archive log and copy the current crash_protector.log contents into it */
+static void OpenArchiveLog(void) {
+    g_logFileArchive = CreateFileA(g_archivePath, GENERIC_WRITE, FILE_SHARE_READ,
+                                   NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (g_logFileArchive == INVALID_HANDLE_VALUE) return;
+
+    /* Replay crash_protector.log contents written so far */
+    if (g_logFile != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(g_logFile);
+        char mainLogPath[MAX_PATH];
+        sprintf_s(mainLogPath, MAX_PATH, "%s\\crash_protector.log", g_logDir);
+        HANDLE hRead = CreateFileA(mainLogPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hRead != INVALID_HANDLE_VALUE) {
+            char buf[4096];
+            DWORD bytesRead;
+            while (ReadFile(hRead, buf, sizeof(buf), &bytesRead, NULL) && bytesRead > 0) {
+                DWORD written;
+                WriteFile(g_logFileArchive, buf, bytesRead, &written, NULL);
+            }
+            CloseHandle(hRead);
+        }
+    }
+}
+
+static void WriteToLog(HANDLE hFile, const char* entry, DWORD len) {
+    DWORD written;
+    WriteFile(hFile, entry, len, &written, NULL);
+    WriteFile(hFile, "\r\n", 2, &written, NULL);
+}
+
 static DWORD WINAPI LogWriterThread(LPVOID param) {
     (void)param;
     while (!g_logShutdown) {
         WaitForSingleObject(g_logEvent, 500); /* wake on signal or periodic flush */
 
+        /* Create archive log once we hit 2 crashes */
+        if (g_logFileArchive == INVALID_HANDLE_VALUE && g_crashesSaved >= 2)
+            OpenArchiveLog();
+
         while (g_logTail != g_logHead) {
             LONG slot = g_logTail & (LOG_RING_SIZE - 1);
             DWORD len = (DWORD)strlen(g_logRing[slot]);
-            if (g_logFile != INVALID_HANDLE_VALUE) {
-                DWORD written;
-                WriteFile(g_logFile, g_logRing[slot], len, &written, NULL);
-                WriteFile(g_logFile, "\r\n", 2, &written, NULL);
-            }
+            if (g_logFile != INVALID_HANDLE_VALUE)
+                WriteToLog(g_logFile, g_logRing[slot], len);
+            if (g_logFileArchive != INVALID_HANDLE_VALUE)
+                WriteToLog(g_logFileArchive, g_logRing[slot], len);
             InterlockedIncrement(&g_logTail);
         }
 
         if (g_logFile != INVALID_HANDLE_VALUE)
             FlushFileBuffers(g_logFile);
+        if (g_logFileArchive != INVALID_HANDLE_VALUE)
+            FlushFileBuffers(g_logFileArchive);
     }
-
-    /* Drain remaining entries on shutdown */
-    while (g_logTail != g_logHead) {
-        LONG slot = g_logTail & (LOG_RING_SIZE - 1);
-        DWORD len = (DWORD)strlen(g_logRing[slot]);
-        if (g_logFile != INVALID_HANDLE_VALUE) {
-            DWORD written;
-            WriteFile(g_logFile, g_logRing[slot], len, &written, NULL);
-            WriteFile(g_logFile, "\r\n", 2, &written, NULL);
-        }
-        InterlockedIncrement(&g_logTail);
-    }
-    if (g_logFile != INVALID_HANDLE_VALUE)
-        FlushFileBuffers(g_logFile);
 
     return 0;
 }
@@ -443,71 +468,104 @@ static DWORD64* GetRegFromContext(CONTEXT* ctx, BYTE regIdx) {
 
 static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    BOOL baleEarly = FALSE;
 
     /* ExceptionInformation[0]: 0 = read, 1 = write, 8 = DEP */
     /* ExceptionInformation[1]: the address that was accessed  */
     ULONG_PTR accessType = ep->ExceptionRecord->ExceptionInformation[0];
     ULONG_PTR addr = ep->ExceptionRecord->ExceptionInformation[1];
+    CONTEXT* ctx = ep->ContextRecord;
 
-    /* Decode the faulting instruction */
-    BYTE* rip = (BYTE*)ep->ContextRecord->Rip;
-    hde64s hs;
-    unsigned int instrLen = hde64_disasm(rip, &hs);
-
-    if (instrLen == 0 || (hs.flags & F_ERROR)) return EXCEPTION_CONTINUE_SEARCH; /* Can't decode - let it crash */
+    const char* accessName = (accessType == 8) ? "EXECUTE" : (accessType == 0) ? "READ" : "WRITE";
 
     LONG count = InterlockedIncrement(&g_crashesSaved);
 
-    /* Resolve the faulting RIP to a module name + offset */
-    HMODULE hFaultMod = NULL;
-    char modName[MAX_PATH] = "???";
-    DWORD64 modOffset = 0;
-    GetModuleHandleExA(
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        (LPCSTR)rip, &hFaultMod);
-    if (hFaultMod) {
-        GetModuleFileNameA(hFaultMod, modName, MAX_PATH);
-        modOffset = (DWORD64)(rip - (BYTE*)hFaultMod);
-    }
+    LogEvent("ACCESS_VIOLATION #%ld: %s addr=0x%016llX RIP=0x%016llX", count, accessName, (unsigned long long)addr, (unsigned long long)ctx->Rip);
 
-    LogEvent("SAVED #%ld: %s addr=0x%016llX RIP=0x%016llX instrLen=%u", count, (accessType == 0) ? "READ" : "WRITE",
-             (unsigned long long)addr, (unsigned long long)rip, instrLen);
-    LogEvent("  Module: %s +0x%llX", modName, (unsigned long long)modOffset);
+    hde64s hs;
+    unsigned int instrLen = 0;
+    DWORD64 retAddr = 0;
 
-    CONTEXT* ctx = ep->ContextRecord;
-    LogEvent("  RAX=%016llX RBX=%016llX RCX=%016llX RDX=%016llX",
-             ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx);
-    LogEvent("  RSI=%016llX RDI=%016llX RBP=%016llX RSP=%016llX",
-             ctx->Rsi, ctx->Rdi, ctx->Rbp, ctx->Rsp);
-    LogEvent("  R8 =%016llX R9 =%016llX R10=%016llX R11=%016llX",
-             ctx->R8, ctx->R9, ctx->R10, ctx->R11);
-    LogEvent("  R12=%016llX R13=%016llX R14=%016llX R15=%016llX",
-             ctx->R12, ctx->R13, ctx->R14, ctx->R15);
+    /* Recovery */
+    if (accessType == 8) {
+        /* EXECUTE: simulate ret if return address is inside a known module */
+        if (!SafeRead(GetCurrentProcess(), ctx->Rsp, &retAddr, sizeof(retAddr)) || retAddr == 0) {
+            LogEvent("  Recovery: no valid return address on stack, cannot recover");
+            baleEarly = TRUE;
+        } else {
+            HMODULE hRetMod = NULL;
+            GetModuleHandleExA(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (LPCSTR)(ULONG_PTR)retAddr, &hRetMod);
+            if (!hRetMod) {
+                LogEvent("  Recovery: return address 0x%016llX not inside any module, cannot recover",
+                        (unsigned long long)retAddr);
+                baleEarly = TRUE;
+            } else {
+                char retModName[MAX_PATH];
+                GetModuleFileNameA(hRetMod, retModName, MAX_PATH);
+                LogEvent("  Recovery: simulating ret to 0x%016llX (%s +0x%llX)",
+                        (unsigned long long)retAddr, retModName, (unsigned long long)(retAddr - (DWORD64)hRetMod));
+            }
+        }
+    } else {
+        /* For read/write, decode the faulting instruction first (bail early if we can't) */
+        instrLen = hde64_disasm((BYTE*)ctx->Rip, &hs);
+        if (instrLen == 0 || (hs.flags & F_ERROR))
+        {
+            LogEvent("  Failed to decode instruction at RIP, cannot analyze or recover");
+            baleEarly = TRUE;
+        }
 
-    LogStackTrace(ctx);
-
-    if (accessType == 0) {
-        /* READ: zero the destination register so the game gets 0 */
-        if (hs.flags & F_MODRM) {
-            BYTE regIdx = (hs.modrm >> 3) & 7;
-            /* REX.R extends the reg field to 4 bits (registers R8-R15) */
-            if (hs.rex & 0x04) regIdx |= 8;
-            DWORD64* reg = GetRegFromContext(ep->ContextRecord, regIdx);
-            if (reg) *reg = 0;
+        /* Resolve RIP module (meaningful for read/write; RIP is outside any module for execute) */
+        HMODULE hFaultMod = NULL;
+        char modName[MAX_PATH] = "???";
+        DWORD64 modOffset = 0;
+        GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)(ULONG_PTR)ctx->Rip, &hFaultMod);
+        if (hFaultMod) {
+            GetModuleFileNameA(hFaultMod, modName, MAX_PATH);
+            modOffset = ctx->Rip - (DWORD64)hFaultMod;
+            LogEvent("  Module: %s +0x%llX instrLen=%u", modName, (unsigned long long)modOffset, instrLen);
         }
     }
-    /* WRITE: nothing to do - just skip the instruction (discard the write) */
 
-    /* Advance past the faulting instruction */
-    ep->ContextRecord->Rip += instrLen;
+    /* Registers + stack trace (shared) */
+    LogEvent("  RAX=%016llX RBX=%016llX RCX=%016llX RDX=%016llX RSI=%016llX RDI=%016llX RBP=%016llX RSP=%016llX R8 =%016llX R9 =%016llX R10=%016llX R11=%016llX R12=%016llX R13=%016llX R14=%016llX R15=%016llX", ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->Rbp, ctx->Rsp, ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13, ctx->R14, ctx->R15);
+    LogStackTrace(ctx);
+
+    if (baleEarly) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Try fixing what is wrong
+    if (accessType == 8) {
+        // Jump to return address, and fix stack.
+        ctx->Rip = retAddr;
+        ctx->Rsp += 8;
+        ctx->Rax = 0;
+    } else {
+        if (accessType == 0) {
+            /* READ: zero the destination register so the game gets 0 */
+            if (hs.flags & F_MODRM) {
+                BYTE regIdx = (hs.modrm >> 3) & 7;
+                if (hs.rex & 0x04) regIdx |= 8;
+                DWORD64* reg = GetRegFromContext(ctx, regIdx);
+                if (reg) *reg = 0;
+            }
+        }
+        // Skip current instruction
+        ctx->Rip += instrLen;
+    }
 
     /* Show a window popup message on the 2nd event, and on the 20th */
     if (count == 2 || count == 20) {
         char msg[300];
         sprintf_s(msg, sizeof(msg),
                   "CrashProtector: Saved from crashing.\n"
-                  "See %s\\crash_protector.log for details.",
-                  cwd);
+                  "See %s for details.",
+                  g_logDir);
         ShowBalloon("WC3 crash protector!", msg);
     }
 
@@ -586,12 +644,26 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         LoadRealVersion();
         DisableThreadLibraryCalls(hModule);
 
-        /* Set up async logging */
-        g_logFile = CreateFileA("crash_protector.log", GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        /* Build log dir and both log paths under Documents\CrashProtector */
+        {
+            char docsPath[MAX_PATH];
+            char logPath[MAX_PATH];
+            if (FAILED(SHGetFolderPathA(NULL, CSIDL_PERSONAL, NULL, 0, docsPath)))
+                strcpy_s(docsPath, MAX_PATH, ".");
+            sprintf_s(g_logDir, MAX_PATH, "%s\\CrashProtector", docsPath);
+            CreateDirectoryA(g_logDir, NULL); /* ok if already exists */
+
+            sprintf_s(logPath, MAX_PATH, "%s\\crash_protector.log", g_logDir);
+            g_logFile = CreateFileA(logPath, GENERIC_WRITE, FILE_SHARE_READ,
+                                    NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+            SYSTEMTIME st;
+            GetLocalTime(&st);
+            sprintf_s(g_archivePath, MAX_PATH, "%s\\crash_%04d-%02d-%02d_%02d-%02d-%02d.log",
+                      g_logDir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        }
         g_logEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
         g_logThread = CreateThread(NULL, 0, LogWriterThread, NULL, 0, NULL);
-
-        GetCurrentDirectoryA(MAX_PATH, cwd);
         InitSymbols();
         LogEvent("=== CrashProtector loaded (PID %lu, symbols=%s) ===",
                  GetCurrentProcessId(), g_hasSymbols ? "YES" : "NO");
@@ -605,7 +677,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
 
         LogEvent("Ready - monitoring for invalid pointer access violations");
     } else if (reason == DLL_PROCESS_DETACH) {
-        LogEvent("=== CrashProtector unloading. Total crashes saved: %ld ===", g_crashesSaved);
+        LogEvent("=== CrashProtector unloading. Total crashes reported: %ld ===", g_crashesSaved);
 
         /* Shut down the log writer thread (give it 2s to drain) */
         InterlockedExchange(&g_logShutdown, 1);
@@ -616,6 +688,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         }
         if (g_logEvent) CloseHandle(g_logEvent);
         if (g_logFile != INVALID_HANDLE_VALUE) CloseHandle(g_logFile);
+        if (g_logFileArchive != INVALID_HANDLE_VALUE) CloseHandle(g_logFileArchive);
         if (g_hasSymbols && g_SymCleanup) g_SymCleanup(GetCurrentProcess());
         if (g_dbgHelp) FreeLibrary(g_dbgHelp);
         if (g_realVersion) FreeLibrary(g_realVersion);

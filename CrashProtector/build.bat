@@ -41,7 +41,7 @@ if %ERRORLEVEL% EQU 0 (
 
 if "%~1"=="" (
     echo.
-    echo Usage: install.bat "D:\Program Files (x86)\Warcraft III\_retail_\x86_64" "(adjust path to your wc install location)"
+    echo Usage: build.bat "D:\Program Files (x86)\Warcraft III\_retail_\x86_64" "(adjust path to your wc install location)"
     echo.
     exit /b 1
 )
