@@ -17,6 +17,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <tlhelp32.h>
 
 #pragma comment(lib, "Shell32.lib")
 
@@ -51,6 +52,7 @@ static pfnSymGetModuleBase64         g_SymGetModuleBase64;
 static pfnSymSetContext              g_SymSetContext;
 static pfnSymEnumSymbols             g_SymEnumSymbols;
 static BOOL                          g_hasSymbols = FALSE;
+static CRITICAL_SECTION              g_dbgHelpLock;
 
 /* Forward declaration – LogEvent is defined later with the async ring buffer */
 static void LogEvent(const char* fmt, ...);
@@ -241,11 +243,27 @@ static void CollectFrameParams(HANDLE hProc, CONTEXT* ctx, STACKFRAME64* frame,
         memcpy(outBuf, ep.buf, ep.bufPos + 1);
 }
 
-static void LogStackTrace(CONTEXT* ctx) {
+/* Resolve a symbol name for an address (works for PE exports even without PDBs) */
+static const char* ResolveSymbol(HANDLE hProc, DWORD64 addr,
+                                  char* symBuf, size_t symBufSize) {
+    if (!g_SymFromAddr) return "???";
+    PSYMBOL_INFO sym = (PSYMBOL_INFO)symBuf;
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen   = (ULONG)(symBufSize - sizeof(SYMBOL_INFO));
+    DWORD64 disp = 0;
+    EnterCriticalSection(&g_dbgHelpLock);
+    BOOL ok = g_SymFromAddr(hProc, addr, &disp, sym);
+    LeaveCriticalSection(&g_dbgHelpLock);
+    return ok ? sym->Name : "???";
+}
+
+static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
+    /* Registers + stack trace (shared) */
+    LogEvent("  RAX=%016llX RBX=%016llX RCX=%016llX RDX=%016llX RSI=%016llX RDI=%016llX RBP=%016llX RSP=%016llX R8 =%016llX R9 =%016llX R10=%016llX R11=%016llX R12=%016llX R13=%016llX R14=%016llX R15=%016llX", ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->Rbp, ctx->Rsp, ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13, ctx->R14, ctx->R15);
+
     if (!g_hasSymbols) return;
 
-    HANDLE hProc   = GetCurrentProcess();
-    HANDLE hThread = GetCurrentThread();
+    HANDLE hProc = GetCurrentProcess();
 
     CONTEXT ctxCopy = *ctx;  /* StackWalk64 may modify the context */
 
@@ -259,6 +277,8 @@ static void LogStackTrace(CONTEXT* ctx) {
     frame.AddrStack.Mode   = AddrModeFlat;
 
     LogEvent("  --- Stack Trace (Newest first) ---");
+
+    EnterCriticalSection(&g_dbgHelpLock);
 
     for (int i = 0; i < 64; i++) {
         if (!g_StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProc, hThread, &frame,
@@ -295,6 +315,8 @@ static void LogStackTrace(CONTEXT* ctx) {
             LogEvent("  #0x%x  0x%llx in %s (%s)", i, (unsigned long long)pc,
                      funcName, paramsBuf);
     }
+
+    LeaveCriticalSection(&g_dbgHelpLock);
 }
 
 void ShowBalloon(const char* title, const char* message)
@@ -322,6 +344,7 @@ static HANDLE g_logFile = INVALID_HANDLE_VALUE;
 static HANDLE g_logFileArchive = INVALID_HANDLE_VALUE;
 static char g_archivePath[MAX_PATH];
 static volatile LONG g_crashesSaved = 0;
+static volatile LONG g_hangDetected = 0;
 static char g_logDir[MAX_PATH];
 
 /* Lock-free ring buffer for async log writes */
@@ -371,8 +394,8 @@ static DWORD WINAPI LogWriterThread(LPVOID param) {
     while (!g_logShutdown) {
         WaitForSingleObject(g_logEvent, 500); /* wake on signal or periodic flush */
 
-        /* Create archive log once we hit 2 crashes */
-        if (g_logFileArchive == INVALID_HANDLE_VALUE && g_crashesSaved >= 2)
+        /* Create archive log once we hit 2 crashes or a hang is detected */
+        if (g_logFileArchive == INVALID_HANDLE_VALUE && (g_crashesSaved >= 2 || g_hangDetected))
             OpenArchiveLog();
 
         while (g_logTail != g_logHead) {
@@ -527,13 +550,12 @@ static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
         if (hFaultMod) {
             GetModuleFileNameA(hFaultMod, modName, MAX_PATH);
             modOffset = ctx->Rip - (DWORD64)hFaultMod;
-            LogEvent("  Module: %s +0x%llX instrLen=%u", modName, (unsigned long long)modOffset, instrLen);
+            char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+            const char* symName = ResolveSymbol(GetCurrentProcess(), ctx->Rip, symBuf, sizeof(symBuf));
+            LogEvent("  Module: %s +0x%llX (%s) instrLen=%u", modName, (unsigned long long)modOffset, symName, instrLen);
         }
     }
-
-    /* Registers + stack trace (shared) */
-    LogEvent("  RAX=%016llX RBX=%016llX RCX=%016llX RDX=%016llX RSI=%016llX RDI=%016llX RBP=%016llX RSP=%016llX R8 =%016llX R9 =%016llX R10=%016llX R11=%016llX R12=%016llX R13=%016llX R14=%016llX R15=%016llX", ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->Rbp, ctx->Rsp, ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13, ctx->R14, ctx->R15);
-    LogStackTrace(ctx);
+    LogRegsAndStackTrace(ctx, GetCurrentThread());
 
     if (baleEarly) {
         return EXCEPTION_CONTINUE_SEARCH;
@@ -634,6 +656,237 @@ static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
   PROXY(VerQueryValueW, 16)
 
 /* ------------------------------------------------------------------ */
+/*  Hang Detection Watchdog                                           */
+/* ------------------------------------------------------------------ */
+
+static HANDLE g_watchdogThread = NULL;
+static volatile LONG g_watchdogShutdown = 0;
+static DWORD g_mainThreadId = 0;
+static DWORD g_watchdogThreadId = 0;
+static DWORD g_logWriterThreadId = 0;
+
+#define WATCHDOG_INTERVAL_MS  3000   /* how often to check */
+#define WATCHDOG_TIMEOUT_MS  10000   /* how long before we declare a hang */
+
+/* EnumThreadWindows callback — grab the first top-level window */
+static BOOL CALLBACK FindThreadWindowCb(HWND hwnd, LPARAM lParam) {
+    if (IsWindowVisible(hwnd)) {
+        *(HWND*)lParam = hwnd;
+        return FALSE; /* stop enumeration */
+    }
+    return TRUE;
+}
+
+static HWND FindMainThreadWindow(void) {
+    HWND hwnd = NULL;
+    EnumThreadWindows(g_mainThreadId, FindThreadWindowCb, (LPARAM)&hwnd);
+    return hwnd;
+}
+
+static void LogThreadInfo(DWORD threadId, HANDLE hThread, CONTEXT* ctx) {
+    HANDLE hProc = GetCurrentProcess();
+    DWORD64 rip = ctx->Rip;
+
+    /* Resolve RIP module + offset */
+    HMODULE hMod = NULL;
+    char modName[MAX_PATH] = "???";
+    DWORD64 modOffset = 0;
+    GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCSTR)(ULONG_PTR)rip, &hMod);
+
+    BOOL inGameExe = FALSE;
+    if (hMod) {
+        GetModuleFileNameA(hMod, modName, MAX_PATH);
+        modOffset = rip - (DWORD64)hMod;
+        /* Check if RIP is in the main game executable */
+        inGameExe = (hMod == GetModuleHandleA(NULL));
+    }
+
+    /* Resolve RIP symbol name */
+    char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+    const char* symName = ResolveSymbol(hProc, rip, symBuf, sizeof(symBuf));
+
+    const char* marker = (threadId == g_mainThreadId) ? " [MAIN]" :
+                         inGameExe ? " [GAME CODE]" : "";
+
+    LogEvent("  Thread %lu%s: RIP=0x%016llX %s +0x%llX (%s)",
+             threadId, marker,
+             (unsigned long long)rip, modName,
+             (unsigned long long)modOffset, symName);
+
+    /* Only dump registers + stack for interesting threads (not idle system waits) */
+    BOOL isNtdll = (strstr(modName, "ntdll.dll") != NULL);
+    if (!isNtdll)
+        LogRegsAndStackTrace(ctx, hThread);
+}
+
+static void DumpAllThreadStacks(void) {
+    DWORD pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        LogEvent("Watchdog: failed to create thread snapshot");
+        return;
+    }
+
+    LogEvent("=== Hang Diagnostic: All Thread Stacks ===");
+
+    THREADENTRY32 te;
+    te.dwSize = sizeof(te);
+
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID != pid) continue;
+
+            /* Skip our own threads */
+            DWORD tid = te.th32ThreadID;
+            if (tid == g_watchdogThreadId || tid == g_logWriterThreadId) continue;
+
+            HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                                        FALSE, tid);
+            if (!hThread) continue;
+
+            if (SuspendThread(hThread) != (DWORD)-1) {
+                CONTEXT ctx;
+                memset(&ctx, 0, sizeof(ctx));
+                ctx.ContextFlags = CONTEXT_FULL;
+
+                if (GetThreadContext(hThread, &ctx)) {
+                    LogThreadInfo(tid, hThread, &ctx);
+                } else {
+                    LogEvent("  Thread %lu: failed to get context (err=%lu)", tid, GetLastError());
+                }
+
+                ResumeThread(hThread);
+            }
+
+            CloseHandle(hThread);
+        } while (Thread32Next(snap, &te));
+    }
+
+    CloseHandle(snap);
+    LogEvent("=== End Hang Diagnostic ===");
+}
+
+/* Sample and log just the main thread's current RIP (module + symbol). */
+static void LogMainThreadLocation(void) {
+    HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT,
+                                FALSE, g_mainThreadId);
+    if (!hThread) return;
+
+    if (SuspendThread(hThread) != (DWORD)-1) {
+        CONTEXT ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.ContextFlags = CONTEXT_CONTROL;
+
+        if (GetThreadContext(hThread, &ctx)) {
+            DWORD64 rip = ctx.Rip;
+            HMODULE hMod = NULL;
+            char modName[MAX_PATH] = "???";
+            DWORD64 modOffset = 0;
+            GetModuleHandleExA(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (LPCSTR)(ULONG_PTR)rip, &hMod);
+            if (hMod) {
+                GetModuleFileNameA(hMod, modName, MAX_PATH);
+                modOffset = rip - (DWORD64)hMod;
+            }
+            char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+            const char* symName = ResolveSymbol(GetCurrentProcess(), rip, symBuf, sizeof(symBuf));
+            LogEvent("  Thread %lu [MAIN]: RIP=0x%016llX %s +0x%llX (%s)",
+                     g_mainThreadId,
+                     (unsigned long long)rip, modName,
+                     (unsigned long long)modOffset, symName);
+        }
+        ResumeThread(hThread);
+    }
+    CloseHandle(hThread);
+}
+
+static DWORD WINAPI WatchdogThread(LPVOID param) {
+    (void)param;
+
+    /* Wait for the main thread to create its window */
+    HWND hwnd = NULL;
+    while (!g_watchdogShutdown) {
+        hwnd = FindMainThreadWindow();
+        if (hwnd) break;
+        Sleep(1000);
+    }
+    if (!hwnd) return 0;
+
+    LogEvent("Watchdog: found game window (HWND=0x%llX, tid=%lu)",
+             (unsigned long long)(ULONG_PTR)hwnd, g_mainThreadId);
+
+    BOOL hangDumped = FALSE;
+    DWORD lastDumpTime = 0;
+    DWORD hangStartTime = 0;
+    int recoveryCount = 0;
+    int hangTickCount = 0;
+    #define HANG_DUMP_COOLDOWN_MS 60000
+    #define HANG_MONITOR_DURATION_MS 60000  /* sample main thread for 1 min then go quiet */
+    #define RECOVERY_THRESHOLD 3  /* consecutive OK responses before declaring recovery */
+
+    while (!g_watchdogShutdown) {
+        Sleep(WATCHDOG_INTERVAL_MS);
+        if (g_watchdogShutdown) break;
+
+        /* Re-find the window in case it was recreated */
+        hwnd = FindMainThreadWindow();
+        if (!hwnd) {
+            LogEvent("Watchdog: game window gone, stopping");
+            break;
+        }
+
+        DWORD_PTR result = 0;
+        LRESULT ok = SendMessageTimeoutA(hwnd, WM_NULL, 0, 0,
+                                          SMTO_ABORTIFHUNG, WATCHDOG_TIMEOUT_MS, &result);
+        if (ok != 0) {
+            /* Genuine response from the message loop */
+            if (hangDumped) {
+                recoveryCount++;
+                if (recoveryCount >= RECOVERY_THRESHOLD) {
+                    LogEvent("Watchdog: main thread recovered (%d consecutive responses)",
+                             recoveryCount);
+                    hangDumped = FALSE;
+                    recoveryCount = 0;
+                }
+            }
+        } else {
+            /* SendMessageTimeout failed — treat any failure as hung */
+            recoveryCount = 0;
+            DWORD now = GetTickCount();
+
+            if (!hangDumped) {
+                /* First detection of a new hang episode */
+                hangStartTime = now;
+                hangTickCount = 0;
+                LogEvent("HANG DETECTED: main thread not responding");
+                InterlockedExchange(&g_hangDetected, 1);
+                ShowBalloon("WC3 Hang Detected!", "Main thread is not responding. See CrashProtector logs.");
+
+                if ((now - lastDumpTime) >= HANG_DUMP_COOLDOWN_MS) {
+                    DumpAllThreadStacks();
+                    lastDumpTime = now;
+                }
+                hangDumped = TRUE;
+            } else if ((now - hangStartTime) < HANG_MONITOR_DURATION_MS) {
+                /* Ongoing hang — sample main thread location for up to 1 minute */
+                hangTickCount++;
+                LogMainThreadLocation();
+            } else if (hangTickCount > 0) {
+                /* Past 1 minute — log once that we're going quiet */
+                LogEvent("Watchdog: still hung after %lus, stopping periodic samples",
+                         (now - hangStartTime) / 1000);
+                hangTickCount = -1; /* sentinel: already logged the quiet message */
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /*  DLL Entry Point                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -641,6 +894,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     (void)reserved;
 
     if (reason == DLL_PROCESS_ATTACH) {
+        g_mainThreadId = GetCurrentThreadId();
         LoadRealVersion();
         DisableThreadLibraryCalls(hModule);
 
@@ -663,7 +917,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                       g_logDir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
         }
         g_logEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
-        g_logThread = CreateThread(NULL, 0, LogWriterThread, NULL, 0, NULL);
+        InitializeCriticalSection(&g_dbgHelpLock);
+        g_logThread = CreateThread(NULL, 0, LogWriterThread, NULL, 0, &g_logWriterThreadId);
         InitSymbols();
         LogEvent("=== CrashProtector loaded (PID %lu, symbols=%s) ===",
                  GetCurrentProcessId(), g_hasSymbols ? "YES" : "NO");
@@ -676,8 +931,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         }
 
         LogEvent("Ready - monitoring for invalid pointer access violations");
+
+        /* Start the hang-detection watchdog */
+        g_watchdogThread = CreateThread(NULL, 0, WatchdogThread, NULL, 0, &g_watchdogThreadId);
+        if (g_watchdogThread)
+            LogEvent("Watchdog thread started");
     } else if (reason == DLL_PROCESS_DETACH) {
         LogEvent("=== CrashProtector unloading. Total crashes reported: %ld ===", g_crashesSaved);
+
+        /* Shut down the watchdog thread */
+        InterlockedExchange(&g_watchdogShutdown, 1);
+        if (g_watchdogThread) {
+            WaitForSingleObject(g_watchdogThread, 2000);
+            CloseHandle(g_watchdogThread);
+        }
 
         /* Shut down the log writer thread (give it 2s to drain) */
         InterlockedExchange(&g_logShutdown, 1);
@@ -690,6 +957,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         if (g_logFile != INVALID_HANDLE_VALUE) CloseHandle(g_logFile);
         if (g_logFileArchive != INVALID_HANDLE_VALUE) CloseHandle(g_logFileArchive);
         if (g_hasSymbols && g_SymCleanup) g_SymCleanup(GetCurrentProcess());
+        DeleteCriticalSection(&g_dbgHelpLock);
         if (g_dbgHelp) FreeLibrary(g_dbgHelp);
         if (g_realVersion) FreeLibrary(g_realVersion);
     }

@@ -1,3 +1,8 @@
 *.obj
 *.lib
 *.exp
+*.exe
+*.pdb
+*.json
+*.bak
+PdbPorter/ghidra_project/*
