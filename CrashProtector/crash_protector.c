@@ -666,7 +666,7 @@ static DWORD g_watchdogThreadId = 0;
 static DWORD g_logWriterThreadId = 0;
 
 #define WATCHDOG_INTERVAL_MS  3000   /* how often to check */
-#define WATCHDOG_TIMEOUT_MS  10000   /* how long before we declare a hang */
+#define WATCHDOG_TIMEOUT_MS   10000   /* how long before we declare a hang */
 
 /* EnumThreadWindows callback — grab the first top-level window */
 static BOOL CALLBACK FindThreadWindowCb(HWND hwnd, LPARAM lParam) {
@@ -803,6 +803,96 @@ static void LogMainThreadLocation(void) {
     CloseHandle(hThread);
 }
 
+/* ------------------------------------------------------------------ */
+/*  Hang Recovery via Stack Unwinding                                  */
+/* ------------------------------------------------------------------ */
+
+#define HANG_RECOVERY_THRESHOLD 7   /* sampling ticks before attempting recovery */
+#define HANG_UNWIND_FRAMES      15
+
+typedef PRUNTIME_FUNCTION (WINAPI *pfnRtlLookupFunctionEntry)(
+    DWORD64 ControlPc, PDWORD64 ImageBase, PVOID HistoryTable);
+typedef PEXCEPTION_ROUTINE (WINAPI *pfnRtlVirtualUnwind)(
+    DWORD HandlerType, DWORD64 ImageBase, DWORD64 ControlPc,
+    PRUNTIME_FUNCTION FunctionEntry, PCONTEXT ContextRecord,
+    PVOID *HandlerData, PDWORD64 EstablisherFrame, PVOID ContextPointers);
+
+static BOOL AttemptHangRecovery(void) {
+    HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
+                                FALSE, g_mainThreadId);
+    if (!hThread) return FALSE;
+
+    BOOL recovered = FALSE;
+
+    if (SuspendThread(hThread) != (DWORD)-1) {
+        CONTEXT ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.ContextFlags = CONTEXT_FULL;
+
+        if (GetThreadContext(hThread, &ctx)) {
+            HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+            pfnRtlLookupFunctionEntry pLookup = (pfnRtlLookupFunctionEntry)
+                GetProcAddress(hNtdll, "RtlLookupFunctionEntry");
+            pfnRtlVirtualUnwind pUnwind = (pfnRtlVirtualUnwind)
+                GetProcAddress(hNtdll, "RtlVirtualUnwind");
+
+            if (pLookup && pUnwind) {
+                LogEvent("HANG RECOVERY: unwinding %d frames from RIP=0x%016llX",
+                         HANG_UNWIND_FRAMES, (unsigned long long)ctx.Rip);
+
+                BOOL unwindOk = TRUE;
+                for (int i = 0; i < HANG_UNWIND_FRAMES; i++) {
+                    DWORD64 imageBase = 0;
+                    PRUNTIME_FUNCTION funcEntry = pLookup(ctx.Rip, &imageBase, NULL);
+                    if (!funcEntry) {
+                        LogEvent("  frame %d: no unwind info at RIP=0x%016llX, aborting",
+                                 i, (unsigned long long)ctx.Rip);
+                        unwindOk = FALSE;
+                        break;
+                    }
+
+                    PVOID handlerData = NULL;
+                    DWORD64 establisher = 0;
+                    pUnwind(0 /*UNW_FLAG_NHANDLER*/, imageBase, ctx.Rip,
+                            funcEntry, &ctx, &handlerData, &establisher, NULL);
+
+                    /* Log where we landed */
+                    HMODULE hMod = NULL;
+                    char modName[MAX_PATH] = "???";
+                    GetModuleHandleExA(
+                        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                        (LPCSTR)(ULONG_PTR)ctx.Rip, &hMod);
+                    if (hMod) GetModuleFileNameA(hMod, modName, MAX_PATH);
+
+                    char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+                    const char* symName = ResolveSymbol(GetCurrentProcess(), ctx.Rip,
+                                                        symBuf, sizeof(symBuf));
+                    LogEvent("  frame %d -> RIP=0x%016llX (%s) %s",
+                             i, (unsigned long long)ctx.Rip, symName, modName);
+                }
+
+                if (unwindOk) {
+                    ctx.Rax = 0; /* return failure / empty result */
+                    if (SetThreadContext(hThread, &ctx)) {
+                        LogEvent("HANG RECOVERY: context set (RAX=0), resuming thread");
+                        recovered = TRUE;
+                    } else {
+                        LogEvent("HANG RECOVERY: SetThreadContext failed (err=%lu)",
+                                 GetLastError());
+                    }
+                }
+            } else {
+                LogEvent("HANG RECOVERY: RtlVirtualUnwind not available");
+            }
+        }
+
+        ResumeThread(hThread);
+    }
+
+    CloseHandle(hThread);
+    return recovered;
+}
+
 static DWORD WINAPI WatchdogThread(LPVOID param) {
     (void)param;
 
@@ -825,7 +915,7 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     int hangTickCount = 0;
     #define HANG_DUMP_COOLDOWN_MS 60000
     #define HANG_MONITOR_DURATION_MS 60000  /* sample main thread for 1 min then go quiet */
-    #define RECOVERY_THRESHOLD 3  /* consecutive OK responses before declaring recovery */
+    #define RECOVERY_THRESHOLD 2  /* consecutive OK responses before declaring recovery */
 
     while (!g_watchdogShutdown) {
         Sleep(WATCHDOG_INTERVAL_MS);
@@ -874,6 +964,11 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
                 /* Ongoing hang — sample main thread location for up to 1 minute */
                 hangTickCount++;
                 LogMainThreadLocation();
+
+                if (hangTickCount == HANG_RECOVERY_THRESHOLD) {
+                    if (AttemptHangRecovery())
+                        LogEvent("Watchdog: hang recovery attempted, monitoring for result");
+                }
             } else if (hangTickCount > 0) {
                 /* Past 1 minute — log once that we're going quiet */
                 LogEvent("Watchdog: still hung after %lus, stopping periodic samples",
