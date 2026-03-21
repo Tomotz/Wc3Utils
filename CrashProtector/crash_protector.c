@@ -14,17 +14,13 @@
 #include <windows.h>
 
 #include "hde64.h"
-#include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <tlhelp32.h>
 
 #pragma comment(lib, "Shell32.lib")
 
-/* ------------------------------------------------------------------ */
 /*  DbgHelp – loaded dynamically so there is zero cost without a PDB  */
-/* ------------------------------------------------------------------ */
-
 #include <dbghelp.h>
 
 typedef BOOL  (WINAPI *pfnSymInitialize)(HANDLE, PCSTR, BOOL);
@@ -53,9 +49,6 @@ static pfnSymSetContext              g_SymSetContext;
 static pfnSymEnumSymbols             g_SymEnumSymbols;
 static BOOL                          g_hasSymbols = FALSE;
 static CRITICAL_SECTION              g_dbgHelpLock;
-
-/* Forward declaration – LogEvent is defined later with the async ring buffer */
-static void LogEvent(const char* fmt, ...);
 
 static void InitSymbols(void) {
     g_dbgHelp = LoadLibraryA("dbghelp.dll");
@@ -105,6 +98,130 @@ static void InitSymbols(void) {
         if (g_SymFromAddr(hProc, probeAddr, &disp, sym))
             g_hasSymbols = TRUE;
     }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Async Logging                                                     */
+/* ------------------------------------------------------------------ */
+
+static HANDLE g_logFile = INVALID_HANDLE_VALUE;
+static HANDLE g_logFileArchive = INVALID_HANDLE_VALUE;
+static char g_archivePath[MAX_PATH];
+static volatile LONG g_crashesSaved = 0;
+static volatile LONG g_hangDetected = 0;
+static char g_logDir[MAX_PATH];
+
+/* Lock-free ring buffer for async log writes */
+#define LOG_RING_SIZE 256          /* must be power of 2 */
+#define LOG_ENTRY_SIZE 512
+
+static char g_logRing[LOG_RING_SIZE][LOG_ENTRY_SIZE];
+static volatile LONG g_logHead = 0;  /* next slot to write */
+static volatile LONG g_logTail = 0;  /* next slot to read  */
+static HANDLE g_logEvent = NULL;     /* signals writer thread */
+static HANDLE g_logThread = NULL;
+static volatile LONG g_logShutdown = 0;
+
+/* Open the archive log and copy the current crash_protector.log contents into it */
+static void OpenArchiveLog(void) {
+    g_logFileArchive = CreateFileA(g_archivePath, GENERIC_WRITE, FILE_SHARE_READ,
+                                   NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (g_logFileArchive == INVALID_HANDLE_VALUE) return;
+
+    /* Replay crash_protector.log contents written so far */
+    if (g_logFile != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(g_logFile);
+        char mainLogPath[MAX_PATH];
+        sprintf_s(mainLogPath, MAX_PATH, "%s\\crash_protector.log", g_logDir);
+        HANDLE hRead = CreateFileA(mainLogPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hRead != INVALID_HANDLE_VALUE) {
+            char buf[4096];
+            DWORD bytesRead;
+            while (ReadFile(hRead, buf, sizeof(buf), &bytesRead, NULL) && bytesRead > 0) {
+                DWORD written;
+                WriteFile(g_logFileArchive, buf, bytesRead, &written, NULL);
+            }
+            CloseHandle(hRead);
+        }
+    }
+}
+
+static void WriteToLog(HANDLE hFile, const char* entry, DWORD len) {
+    DWORD written;
+    WriteFile(hFile, entry, len, &written, NULL);
+    WriteFile(hFile, "\r\n", 2, &written, NULL);
+}
+
+static DWORD WINAPI LogWriterThread(LPVOID param) {
+    (void)param;
+    while (!g_logShutdown) {
+        WaitForSingleObject(g_logEvent, 500); /* wake on signal or periodic flush */
+
+        /* Create archive log once we hit 2 crashes or a hang is detected */
+        if (g_logFileArchive == INVALID_HANDLE_VALUE && (g_crashesSaved >= 2 || g_hangDetected))
+            OpenArchiveLog();
+
+        while (g_logTail != g_logHead) {
+            LONG slot = g_logTail & (LOG_RING_SIZE - 1);
+            DWORD len = (DWORD)strlen(g_logRing[slot]);
+            if (g_logFile != INVALID_HANDLE_VALUE)
+                WriteToLog(g_logFile, g_logRing[slot], len);
+            if (g_logFileArchive != INVALID_HANDLE_VALUE)
+                WriteToLog(g_logFileArchive, g_logRing[slot], len);
+            InterlockedIncrement(&g_logTail);
+        }
+
+        if (g_logFile != INVALID_HANDLE_VALUE)
+            FlushFileBuffers(g_logFile);
+        if (g_logFileArchive != INVALID_HANDLE_VALUE)
+            FlushFileBuffers(g_logFileArchive);
+    }
+
+    return 0;
+}
+
+static void LogEvent(const char* fmt, ...) {
+    /* Grab a slot - if ring is full, drop the message (never block the game) */
+    LONG head, next;
+    do {
+        head = g_logHead;
+        next = head + 1;
+        if ((next - g_logTail) >= LOG_RING_SIZE)
+            return; /* ring full, drop message */
+    } while (InterlockedCompareExchange(&g_logHead, next, head) != head);
+
+    LONG slot = head & (LOG_RING_SIZE - 1);
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    int prefix = sprintf_s(g_logRing[slot], LOG_ENTRY_SIZE,
+        "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+    va_list args;
+    va_start(args, fmt);
+    vsprintf_s(g_logRing[slot] + prefix, LOG_ENTRY_SIZE - prefix, fmt, args);
+    va_end(args);
+
+    /* Signal the writer thread */
+    if (g_logEvent) SetEvent(g_logEvent);
+}
+
+void ShowBalloon(const char* title, const char* message)
+{
+    NOTIFYICONDATAA nid = {0};
+    nid.cbSize = sizeof(NOTIFYICONDATAA);
+    nid.hWnd = GetForegroundWindow();   // any window handle works
+    nid.uID = 1;
+    nid.uFlags = NIF_INFO;
+
+    strcpy_s(nid.szInfoTitle, sizeof(nid.szInfoTitle), title);
+    strcpy_s(nid.szInfo, sizeof(nid.szInfo), message);
+
+    nid.dwInfoFlags = NIIF_INFO; // icon type
+
+    Shell_NotifyIconA(NIM_ADD, &nid);
+    Shell_NotifyIconA(NIM_MODIFY, &nid);
 }
 
 /* ------------------------------------------------------------------ */
@@ -309,7 +426,7 @@ static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
         line.SizeOfStruct = sizeof(line);
         DWORD lineDisp = 0;
         if (g_SymGetLineFromAddr64 && g_SymGetLineFromAddr64(hProc, pc, &lineDisp, &line))
-            LogEvent("  #0x%x  0x%llx in %s (%s) at %s:0x%lx", i, (unsigned long long)pc,
+            LogEvent("  #0x%x  0x%llx in %s (%s) at %s:%lu", i, (unsigned long long)pc,
                      funcName, paramsBuf, line.FileName, line.LineNumber);
         else
             LogEvent("  #0x%x  0x%llx in %s (%s)", i, (unsigned long long)pc,
@@ -317,130 +434,6 @@ static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
     }
 
     LeaveCriticalSection(&g_dbgHelpLock);
-}
-
-void ShowBalloon(const char* title, const char* message)
-{
-    NOTIFYICONDATAA nid = {0};
-    nid.cbSize = sizeof(NOTIFYICONDATAA);
-    nid.hWnd = GetForegroundWindow();   // any window handle works
-    nid.uID = 1;
-    nid.uFlags = NIF_INFO;
-
-    strcpy_s(nid.szInfoTitle, strlen(title) + 1, title);
-    strcpy_s(nid.szInfo, strlen(message) + 1, message);
-
-    nid.dwInfoFlags = NIIF_INFO; // icon type
-
-    Shell_NotifyIconA(NIM_ADD, &nid);
-    Shell_NotifyIconA(NIM_MODIFY, &nid);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Async Logging                                                     */
-/* ------------------------------------------------------------------ */
-
-static HANDLE g_logFile = INVALID_HANDLE_VALUE;
-static HANDLE g_logFileArchive = INVALID_HANDLE_VALUE;
-static char g_archivePath[MAX_PATH];
-static volatile LONG g_crashesSaved = 0;
-static volatile LONG g_hangDetected = 0;
-static char g_logDir[MAX_PATH];
-
-/* Lock-free ring buffer for async log writes */
-#define LOG_RING_SIZE 256          /* must be power of 2 */
-#define LOG_ENTRY_SIZE 512
-
-static char g_logRing[LOG_RING_SIZE][LOG_ENTRY_SIZE];
-static volatile LONG g_logHead = 0;  /* next slot to write */
-static volatile LONG g_logTail = 0;  /* next slot to read  */
-static HANDLE g_logEvent = NULL;     /* signals writer thread */
-static HANDLE g_logThread = NULL;
-static volatile LONG g_logShutdown = 0;
-
-/* Open the archive log and copy the current crash_protector.log contents into it */
-static void OpenArchiveLog(void) {
-    g_logFileArchive = CreateFileA(g_archivePath, GENERIC_WRITE, FILE_SHARE_READ,
-                                   NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (g_logFileArchive == INVALID_HANDLE_VALUE) return;
-
-    /* Replay crash_protector.log contents written so far */
-    if (g_logFile != INVALID_HANDLE_VALUE) {
-        FlushFileBuffers(g_logFile);
-        char mainLogPath[MAX_PATH];
-        sprintf_s(mainLogPath, MAX_PATH, "%s\\crash_protector.log", g_logDir);
-        HANDLE hRead = CreateFileA(mainLogPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                   NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hRead != INVALID_HANDLE_VALUE) {
-            char buf[4096];
-            DWORD bytesRead;
-            while (ReadFile(hRead, buf, sizeof(buf), &bytesRead, NULL) && bytesRead > 0) {
-                DWORD written;
-                WriteFile(g_logFileArchive, buf, bytesRead, &written, NULL);
-            }
-            CloseHandle(hRead);
-        }
-    }
-}
-
-static void WriteToLog(HANDLE hFile, const char* entry, DWORD len) {
-    DWORD written;
-    WriteFile(hFile, entry, len, &written, NULL);
-    WriteFile(hFile, "\r\n", 2, &written, NULL);
-}
-
-static DWORD WINAPI LogWriterThread(LPVOID param) {
-    (void)param;
-    while (!g_logShutdown) {
-        WaitForSingleObject(g_logEvent, 500); /* wake on signal or periodic flush */
-
-        /* Create archive log once we hit 2 crashes or a hang is detected */
-        if (g_logFileArchive == INVALID_HANDLE_VALUE && (g_crashesSaved >= 2 || g_hangDetected))
-            OpenArchiveLog();
-
-        while (g_logTail != g_logHead) {
-            LONG slot = g_logTail & (LOG_RING_SIZE - 1);
-            DWORD len = (DWORD)strlen(g_logRing[slot]);
-            if (g_logFile != INVALID_HANDLE_VALUE)
-                WriteToLog(g_logFile, g_logRing[slot], len);
-            if (g_logFileArchive != INVALID_HANDLE_VALUE)
-                WriteToLog(g_logFileArchive, g_logRing[slot], len);
-            InterlockedIncrement(&g_logTail);
-        }
-
-        if (g_logFile != INVALID_HANDLE_VALUE)
-            FlushFileBuffers(g_logFile);
-        if (g_logFileArchive != INVALID_HANDLE_VALUE)
-            FlushFileBuffers(g_logFileArchive);
-    }
-
-    return 0;
-}
-
-static void LogEvent(const char* fmt, ...) {
-    /* Grab a slot - if ring is full, drop the message (never block the game) */
-    LONG head, next;
-    do {
-        head = g_logHead;
-        next = head + 1;
-        if ((next - g_logTail) >= LOG_RING_SIZE)
-            return; /* ring full, drop message */
-    } while (InterlockedCompareExchange(&g_logHead, next, head) != head);
-
-    LONG slot = head & (LOG_RING_SIZE - 1);
-
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    int prefix = sprintf_s(g_logRing[slot], LOG_ENTRY_SIZE,
-        "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-
-    va_list args;
-    va_start(args, fmt);
-    vsprintf_s(g_logRing[slot] + prefix, LOG_ENTRY_SIZE - prefix, fmt, args);
-    va_end(args);
-
-    /* Signal the writer thread */
-    if (g_logEvent) SetEvent(g_logEvent);
 }
 
 /* ------------------------------------------------------------------ */
@@ -491,7 +484,7 @@ static DWORD64* GetRegFromContext(CONTEXT* ctx, BYTE regIdx) {
 
 static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
-    BOOL baleEarly = FALSE;
+    BOOL bailEarly = FALSE;
 
     /* ExceptionInformation[0]: 0 = read, 1 = write, 8 = DEP */
     /* ExceptionInformation[1]: the address that was accessed  */
@@ -514,7 +507,7 @@ static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
         /* EXECUTE: simulate ret if return address is inside a known module */
         if (!SafeRead(GetCurrentProcess(), ctx->Rsp, &retAddr, sizeof(retAddr)) || retAddr == 0) {
             LogEvent("  Recovery: no valid return address on stack, cannot recover");
-            baleEarly = TRUE;
+            bailEarly = TRUE;
         } else {
             HMODULE hRetMod = NULL;
             GetModuleHandleExA(
@@ -523,7 +516,7 @@ static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
             if (!hRetMod) {
                 LogEvent("  Recovery: return address 0x%016llX not inside any module, cannot recover",
                         (unsigned long long)retAddr);
-                baleEarly = TRUE;
+                bailEarly = TRUE;
             } else {
                 char retModName[MAX_PATH];
                 GetModuleFileNameA(hRetMod, retModName, MAX_PATH);
@@ -537,7 +530,7 @@ static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
         if (instrLen == 0 || (hs.flags & F_ERROR))
         {
             LogEvent("  Failed to decode instruction at RIP, cannot analyze or recover");
-            baleEarly = TRUE;
+            bailEarly = TRUE;
         }
 
         /* Resolve RIP module (meaningful for read/write; RIP is outside any module for execute) */
@@ -557,7 +550,7 @@ static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
     }
     LogRegsAndStackTrace(ctx, GetCurrentThread());
 
-    if (baleEarly) {
+    if (bailEarly) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
@@ -997,9 +990,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         LogEvent("Ready - monitoring for invalid pointer access violations");
 
         /* Start the hang-detection watchdog */
-        // g_watchdogThread = CreateThread(NULL, 0, WatchdogThread, NULL, 0, &g_watchdogThreadId);
-        // if (g_watchdogThread)
-        //     LogEvent("Watchdog thread started");
+        g_watchdogThread = CreateThread(NULL, 0, WatchdogThread, NULL, 0, &g_watchdogThreadId);
+        if (g_watchdogThread)
+            LogEvent("Watchdog thread started");
     } else if (reason == DLL_PROCESS_DETACH) {
         LogEvent("=== CrashProtector unloading. Total crashes reported: %ld ===", g_crashesSaved);
 
