@@ -1,0 +1,19 @@
+LIBRARY version
+EXPORTS
+    GetFileVersionInfoA = ng_GetFileVersionInfoA
+    GetFileVersionInfoByHandle = ng_GetFileVersionInfoByHandle
+    GetFileVersionInfoExA = ng_GetFileVersionInfoExA
+    GetFileVersionInfoExW = ng_GetFileVersionInfoExW
+    GetFileVersionInfoSizeA = ng_GetFileVersionInfoSizeA
+    GetFileVersionInfoSizeExA = ng_GetFileVersionInfoSizeExA
+    GetFileVersionInfoSizeExW = ng_GetFileVersionInfoSizeExW
+    GetFileVersionInfoSizeW = ng_GetFileVersionInfoSizeW
+    GetFileVersionInfoW = ng_GetFileVersionInfoW
+    VerFindFileA = ng_VerFindFileA
+    VerFindFileW = ng_VerFindFileW
+    VerInstallFileA = ng_VerInstallFileA
+    VerInstallFileW = ng_VerInstallFileW
+    VerLanguageNameA = ng_VerLanguageNameA
+    VerLanguageNameW = ng_VerLanguageNameW
+    VerQueryValueA = ng_VerQueryValueA
+    VerQueryValueW = ng_VerQueryValueW

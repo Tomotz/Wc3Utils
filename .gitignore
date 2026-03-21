@@ -1,0 +1,11 @@
+*.obj
+*.lib
+*.exp
+*.exe
+*.pdb
+*.json
+*.bak
+PdbPorter/ghidra_project/*
+PdbPorter/.quick_match_cache/*
+*.yaml
+*.pyc
