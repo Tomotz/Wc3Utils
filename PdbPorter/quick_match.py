@@ -1426,6 +1426,76 @@ def main():
                 resolved += 1
         print(f"\r  [{len(all_multi)}/{len(all_multi)}] resolved={resolved}")
 
+    # --- Pass 4: gap filling using matched neighbors ---
+    # name, rva, size, raw
+    remaining = [(n, r, s, b) for n, r, s, b in functions if r not in matched]
+    if remaining:
+        print(f"\nPass 4: gap filling ({len(remaining)} unmatched)...")
+        sorted_pairs = sorted((m[1], m[2]) for m in matched.values())
+        old_rvas_arr = [p[0] for p in sorted_pairs]
+
+        PROLOGUE_LEN = 16
+        SEARCH_WINDOW = 256
+        NGRAM_N = 4
+        MIN_SIM = 0.5
+
+        gap_resolved = 0
+        for i, (name, old_rva, size, raw) in enumerate(remaining):
+            if i % 10000 == 0 and i > 0:
+                print(f"\r  [{i}/{len(remaining)}] gap={gap_resolved}", end="", flush=True)
+            if size < PROLOGUE_LEN:
+                continue
+            idx = bisect.bisect_left(old_rvas_arr, old_rva)
+            if idx == 0 or idx >= len(old_rvas_arr):
+                continue
+
+            pred_old, pred_new = sorted_pairs[idx - 1]
+            succ_old, succ_new = sorted_pairs[idx]
+            if succ_new <= pred_new:
+                continue
+
+            # Expected position by offset from predecessor
+            expected = pred_new + (old_rva - pred_old)
+
+            # Search a window around expected position, clamped to the gap
+            search_start = max(expected - SEARCH_WINDOW, pred_new)
+            search_end = min(expected + SEARCH_WINDOW, succ_new)
+            search_size = search_end - search_start
+            if search_size < PROLOGUE_LEN:
+                continue
+
+            search_bytes = read_bytes_at_rva(new_data, search_start, search_size, new_sections)
+            if search_bytes is None:
+                continue
+
+            # Search for raw prologue bytes (prologues rarely have relocations)
+            prologue = raw[:PROLOGUE_LEN]
+            pos = search_bytes.find(prologue)
+            if pos == -1:
+                continue
+            if search_bytes.find(prologue, pos + 1) != -1:
+                continue  # ambiguous — skip
+
+            new_rva = search_start + pos
+
+            # Verify via n-gram similarity (handles byte shifts from instruction size changes)
+            new_func = read_bytes_at_rva(new_data, new_rva, size, new_sections)
+            if new_func is None:
+                continue
+            old_n = normalize_bytes(raw)
+            new_n = normalize_bytes(new_func)
+            if len(old_n) >= NGRAM_N and len(new_n) >= NGRAM_N:
+                grams_old = set(old_n[j:j+NGRAM_N] for j in range(len(old_n) - NGRAM_N + 1))
+                grams_new = set(new_n[j:j+NGRAM_N] for j in range(len(new_n) - NGRAM_N + 1))
+                sim = len(grams_old & grams_new) / len(grams_old)
+            else:
+                sim = sum(1 for a, b in zip(old_n, new_n) if a == b) / len(old_n)
+            if sim >= MIN_SIM:
+                matched[old_rva] = (name, old_rva, new_rva, size, "gap")
+                gap_resolved += 1
+
+        print(f"\r  [{len(remaining)}/{len(remaining)}] gap={gap_resolved}")
+
     # --- Summary ---
     total = len(matched)
     total_pdb = len(pdb_funcs)

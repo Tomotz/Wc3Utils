@@ -6,3 +6,6 @@
 *.json
 *.bak
 PdbPorter/ghidra_project/*
+PdbPorter/.quick_match_cache/*
+*.yaml
+*.pyc
