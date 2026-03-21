@@ -83,7 +83,7 @@ Additionally, **VCH** (Vectored Continue Handlers, via `AddVectoredContinueHandl
 2. Navigate to this folder
 3. Run the build script with your WC3 path (might not be C:\):
    ```
-   .\build.bat "C:\Program Files (x86)\Warcraft III\_retail_\x86_64"
+   .\build.bat "D:\Program Files (x86)\Warcraft III\_retail_\x86_64"
    ```
 
 This will compile the DLL and copy `version.dll` to your WC3 folder.
@@ -141,3 +141,21 @@ This produces `version.dll` which you can manually copy to your WC3 folder.
 - Only works with 64-bit Windows executables
 - Performance impact is minimal — the filter only activates on unhandled exceptions
 - The game's own exception handlers (SEH) are never interfered with
+
+
+## Full process when new wc3 patch released:
+
+- In crash_protector.c uncomment "DumpDecryptedExe()".
+- From power shell run
+ * cd D:\Tom\scripts\wc3\Wc3Utils\CrashProtector
+ * .\build.bat "D:\Program Files (x86)\Warcraft III\_retail_\x86_64"
+ * This will create version.dll in the folder above.
+- Run wc3
+- This should create D:\Users\Tom\Documents\CrashProtector\wc3_decrypted.exe with this version executable
+- From power shell run
+ * cd D:\Tom\scripts\wc3\Wc3Utils\PdbPorter
+ * cp D:\Users\Tom\Documents\CrashProtector\wc3_decrypted.exe ".\Warcraft III.exe"
+ * del .quick_match_cache
+ * py quick_match.py "Warcraft III_symboled.exe" "Warcraft III.exe" -o symbols.txt --pdb symbols.pdb
+ * This will create symbols.txt and symbols.pdb - note: pdb can be loaded in IDA, but game doesn't recognise it.
+ * cp symbols.txt D:\Program Files (x86)\Warcraft III\_retail_\x86_64

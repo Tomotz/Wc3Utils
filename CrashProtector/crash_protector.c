@@ -48,12 +48,39 @@ static pfnSymFunctionTableAccess64   g_SymFunctionTableAccess64;
 static pfnSymGetModuleBase64         g_SymGetModuleBase64;
 static pfnSymSetContext              g_SymSetContext;
 static pfnSymEnumSymbols             g_SymEnumSymbols;
-static BOOL                          g_hasSymbols = FALSE;
+static BOOL                          g_hasSymbols = FALSE; /* TRUE if PDB or txt symbols loaded */
 static CRITICAL_SECTION              g_dbgHelpLock;
+
+/* ------------------------------------------------------------------ */
+/*  symbols.txt fallback symbol table                                  */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    DWORD nameOff;      /* offset into g_symStrings */
+    BYTE  storage;      /* 0=REG, 1=STACK, 2=UNKNOWN */
+    BYTE  regIdx;       /* CV register ID (low byte) for REG storage */
+    WORD  stackOff;     /* RSP offset for STACK storage */
+} TxtParam;             /* 8 bytes */
+
+typedef struct {
+    DWORD rva;
+    DWORD codeSize;
+    DWORD nameOff;      /* offset into g_symStrings */
+    WORD  paramCount;
+    WORD  paramStart;   /* index into g_txtParams[] */
+} TxtFunc;              /* 16 bytes */
+
+static TxtFunc*  g_txtFuncs    = NULL;
+static DWORD     g_txtFuncCount = 0;
+static TxtParam* g_txtParams   = NULL;
+static DWORD     g_txtParamCount = 0;
+static char*     g_symStrings  = NULL;
+
+static void InitTrace(const char* msg);  /* defined after g_logFile */
 
 static void InitSymbols(void) {
     g_dbgHelp = LoadLibraryA("dbghelp.dll");
-    if (!g_dbgHelp) return;
+    if (!g_dbgHelp) { InitTrace("FAILED to load dbghelp.dll"); return; }
 
     g_SymInitialize            = (pfnSymInitialize)           GetProcAddress(g_dbgHelp, "SymInitialize");
     g_SymCleanup               = (pfnSymCleanup)              GetProcAddress(g_dbgHelp, "SymCleanup");
@@ -65,7 +92,10 @@ static void InitSymbols(void) {
     g_SymSetContext            = (pfnSymSetContext)            GetProcAddress(g_dbgHelp, "SymSetContext");
     g_SymEnumSymbols           = (pfnSymEnumSymbols)           GetProcAddress(g_dbgHelp, "SymEnumSymbols");
 
-    if (!g_SymInitialize || !g_StackWalk64 || !g_SymFunctionTableAccess64 || !g_SymGetModuleBase64) return;
+    if (!g_SymInitialize || !g_StackWalk64 || !g_SymFunctionTableAccess64 || !g_SymGetModuleBase64) {
+        InitTrace("missing required dbghelp exports");
+        return;
+    }
 
     /* Allow loading PDBs even when GUID doesn't match the PE
        (our generated PDBs may have a different GUID) */
@@ -89,25 +119,11 @@ static void InitSymbols(void) {
         if (slash) *slash = '\0';
     }
 
-    if (!g_SymInitialize(hProc, searchPath[0] ? searchPath : NULL, TRUE)) return;
-
-    /* Probe: check if the main executable (wc3.exe) has symbols loaded. */
-    /* The entry point is a known valid address inside the EXE. */
-    HMODULE hExe = GetModuleHandleA(NULL);
-    if (hExe && g_SymFromAddr) {
-        /* Use the EXE's base address + entry point from the PE header */
-        DWORD64 probeAddr = (DWORD64)hExe;
-        IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)hExe;
-        IMAGE_NT_HEADERS* nt  = (IMAGE_NT_HEADERS*)((BYTE*)hExe + dos->e_lfanew);
-        probeAddr += nt->OptionalHeader.AddressOfEntryPoint;
-
-        char buf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
-        PSYMBOL_INFO sym = (PSYMBOL_INFO)buf;
-        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
-        sym->MaxNameLen   = MAX_SYM_NAME;
-        DWORD64 disp = 0;
-        if (g_SymFromAddr(hProc, probeAddr, &disp, sym))
-            g_hasSymbols = TRUE;
+    if (!g_SymInitialize(hProc, searchPath[0] ? searchPath : NULL, TRUE)) {
+        char msg[128];
+        sprintf_s(msg, sizeof(msg), "SymInitialize FAILED err=%lu", GetLastError());
+        InitTrace(msg);
+        return;
     }
 }
 
@@ -121,6 +137,17 @@ static char g_archivePath[MAX_PATH];
 static volatile LONG g_crashesSaved = 0;
 static volatile LONG g_hangDetected = 0;
 static char g_logDir[MAX_PATH];
+
+/* Write a debug trace directly to the log file (synchronous, for init diagnostics) */
+static void InitTrace(const char* msg) {
+    if (g_logFile != INVALID_HANDLE_VALUE) {
+        DWORD written;
+        WriteFile(g_logFile, "[InitSymbols] ", 14, &written, NULL);
+        WriteFile(g_logFile, msg, (DWORD)strlen(msg), &written, NULL);
+        WriteFile(g_logFile, "\r\n", 2, &written, NULL);
+        FlushFileBuffers(g_logFile);
+    }
+}
 
 /* Lock-free ring buffer for async log writes */
 #define LOG_RING_SIZE 256          /* must be power of 2 */
@@ -344,45 +371,369 @@ static BOOL CALLBACK EnumParamsCallback(PSYMBOL_INFO sym, ULONG symSize, PVOID u
     return TRUE; /* continue enumeration */
 }
 
+/* ------------------------------------------------------------------ */
+/*  symbols.txt loader + lookup                                        */
+/* ------------------------------------------------------------------ */
+
+/* Map register name string to CV register ID */
+static ULONG TxtRegNameToCV(const char* name) {
+    if (strcmp(name, "RAX") == 0) return CV_AMD64_RAX;
+    if (strcmp(name, "RBX") == 0) return CV_AMD64_RBX;
+    if (strcmp(name, "RCX") == 0) return CV_AMD64_RCX;
+    if (strcmp(name, "RDX") == 0) return CV_AMD64_RDX;
+    if (strcmp(name, "RSI") == 0) return CV_AMD64_RSI;
+    if (strcmp(name, "RDI") == 0) return CV_AMD64_RDI;
+    if (strcmp(name, "RBP") == 0) return CV_AMD64_RBP;
+    if (strcmp(name, "RSP") == 0) return CV_AMD64_RSP;
+    if (strcmp(name, "R8")  == 0) return CV_AMD64_R8;
+    if (strcmp(name, "R9")  == 0) return CV_AMD64_R9;
+    if (strcmp(name, "R10") == 0) return CV_AMD64_R10;
+    if (strcmp(name, "R11") == 0) return CV_AMD64_R11;
+    if (strcmp(name, "R12") == 0) return CV_AMD64_R12;
+    if (strcmp(name, "R13") == 0) return CV_AMD64_R13;
+    if (strcmp(name, "R14") == 0) return CV_AMD64_R14;
+    if (strcmp(name, "R15") == 0) return CV_AMD64_R15;
+    /* raw "regN" format from quick_match */
+    if (name[0] == 'r' && name[1] == 'e' && name[2] == 'g')
+        return (ULONG)atoi(name + 3);
+    return 0;
+}
+
+static int TxtFuncCmpRva(const void* a, const void* b) {
+    DWORD ra = ((const TxtFunc*)a)->rva;
+    DWORD rb = ((const TxtFunc*)b)->rva;
+    return (ra > rb) - (ra < rb);
+}
+
+/* Find function containing the given RVA via binary search */
+static const TxtFunc* TxtFindFunc(DWORD rva) {
+    if (!g_txtFuncs || g_txtFuncCount == 0) return NULL;
+    DWORD lo = 0, hi = g_txtFuncCount;
+    while (lo < hi) {
+        DWORD mid = lo + (hi - lo) / 2;
+        if (g_txtFuncs[mid].rva <= rva)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo == 0) return NULL;
+    const TxtFunc* f = &g_txtFuncs[lo - 1];
+    if (rva < f->rva + f->codeSize)
+        return f;
+    return NULL;
+}
+
+/* Collect parameters for a txt-symbol function */
+static void TxtCollectFrameParams(const TxtFunc* func, CONTEXT* ctx,
+                                   HANDLE hProc, DWORD64 frameRsp,
+                                   char* outBuf, int outBufSize) {
+    outBuf[0] = '\0';
+    if (func->paramCount == 0) return;
+    int pos = 0;
+    for (WORD i = 0; i < func->paramCount && i < 16; i++) {
+        const TxtParam* p = &g_txtParams[func->paramStart + i];
+        const char* pname = g_symStrings + p->nameOff;
+
+        DWORD64 value = 0;
+        BOOL hasValue = FALSE;
+        if (p->storage == 0) { /* REG */
+            value = CvRegToValue(ctx, p->regIdx);
+            hasValue = TRUE;
+        } else if (p->storage == 1) { /* STACK */
+            hasValue = SafeRead(hProc, frameRsp + p->stackOff, &value, 8);
+        }
+
+        int remaining = outBufSize - pos;
+        if (remaining <= 1) break;
+        int n = 0;
+        if (i > 0) {
+            n = sprintf_s(outBuf + pos, remaining, ", ");
+            pos += (n > 0) ? n : 0;
+            remaining = outBufSize - pos;
+        }
+        if (hasValue)
+            n = sprintf_s(outBuf + pos, remaining, "%s=0x%llx", pname, (unsigned long long)value);
+        else
+            n = sprintf_s(outBuf + pos, remaining, "%s=?", pname);
+        pos += (n > 0) ? n : 0;
+    }
+}
+
+static void LoadSymbolsTxt(void) {
+    /* Build path: exe directory + \symbols.txt */
+    char txtPath[MAX_PATH];
+    if (!GetModuleFileNameA(NULL, txtPath, MAX_PATH)) return;
+    char* slash = strrchr(txtPath, '\\');
+    if (!slash) return;
+    strcpy_s(slash + 1, MAX_PATH - (slash + 1 - txtPath), "symbols.txt");
+
+    HANDLE hFile = CreateFileA(txtPath, GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        InitTrace("symbols.txt not found");
+        return;
+    }
+
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    if (fileSize == 0 || fileSize == INVALID_FILE_SIZE) {
+        CloseHandle(hFile);
+        return;
+    }
+
+    char* rawBuf = (char*)HeapAlloc(GetProcessHeap(), 0, fileSize + 1);
+    if (!rawBuf) { CloseHandle(hFile); return; }
+    DWORD bytesRead;
+    if (!ReadFile(hFile, rawBuf, fileSize, &bytesRead, NULL) || bytesRead == 0) {
+        HeapFree(GetProcessHeap(), 0, rawBuf);
+        CloseHandle(hFile);
+        return;
+    }
+    CloseHandle(hFile);
+    rawBuf[bytesRead] = '\0';
+
+    /* Check TimeDateStamp header */
+    DWORD txtTimestamp = 0;
+    BOOL hasTimestamp = FALSE;
+    if (rawBuf[0] == '#') {
+        const char* tsPrefix = "# TimeDateStamp: ";
+        if (strncmp(rawBuf, tsPrefix, strlen(tsPrefix)) == 0) {
+            txtTimestamp = (DWORD)strtoul(rawBuf + strlen(tsPrefix), NULL, 16);
+            hasTimestamp = TRUE;
+        }
+    }
+
+    if (hasTimestamp) {
+        HMODULE hExe = GetModuleHandleA(NULL);
+        if (hExe) {
+            IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)hExe;
+            IMAGE_NT_HEADERS* nt  = (IMAGE_NT_HEADERS*)((BYTE*)hExe + dos->e_lfanew);
+            DWORD exeTimestamp = nt->FileHeader.TimeDateStamp;
+            if (txtTimestamp != exeTimestamp) {
+                char msg[128];
+                sprintf_s(msg, sizeof(msg), "symbols.txt timestamp mismatch: txt=%08X exe=%08X",
+                          txtTimestamp, exeTimestamp);
+                InitTrace(msg);
+                HeapFree(GetProcessHeap(), 0, rawBuf);
+                return;
+            }
+        }
+    }
+
+    /* Pass 1: count FUNCs, PARAMs, and total string bytes needed */
+    DWORD funcCount = 0, paramCount = 0, stringBytes = 0;
+    {
+        char* p = rawBuf;
+        while (*p) {
+            char* lineEnd = strchr(p, '\n');
+            if (!lineEnd) lineEnd = p + strlen(p);
+            if (p[0] == 'F' && strncmp(p, "FUNC\t", 5) == 0) {
+                funcCount++;
+                /* count func name string */
+                char* t1 = p + 5;
+                char* t2 = strchr(t1, '\t');
+                if (t2) stringBytes += (DWORD)(t2 - t1) + 1;
+            } else if (p[0] == 'P' && strncmp(p, "PARAM\t", 6) == 0) {
+                paramCount++;
+                /* count param name string */
+                char* t1 = p + 6;
+                char* t2 = strchr(t1, '\t');
+                if (t2) stringBytes += (DWORD)(t2 - t1) + 1;
+            }
+            p = (*lineEnd) ? lineEnd + 1 : lineEnd;
+        }
+    }
+
+    if (funcCount == 0) {
+        InitTrace("symbols.txt has no FUNC lines");
+        HeapFree(GetProcessHeap(), 0, rawBuf);
+        return;
+    }
+
+    {
+        char msg[128];
+        sprintf_s(msg, sizeof(msg), "symbols.txt: %lu funcs, %lu params, %lu string bytes",
+                  funcCount, paramCount, stringBytes);
+        InitTrace(msg);
+    }
+
+    /* Allocate arrays */
+    g_txtFuncs  = (TxtFunc*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                       funcCount * sizeof(TxtFunc));
+    g_txtParams = (TxtParam*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                        paramCount * sizeof(TxtParam));
+    g_symStrings = (char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, stringBytes);
+    if (!g_txtFuncs || !g_txtParams || !g_symStrings) {
+        InitTrace("symbols.txt: allocation failed");
+        HeapFree(GetProcessHeap(), 0, rawBuf);
+        if (g_txtFuncs)  { HeapFree(GetProcessHeap(), 0, g_txtFuncs);  g_txtFuncs = NULL; }
+        if (g_txtParams) { HeapFree(GetProcessHeap(), 0, g_txtParams); g_txtParams = NULL; }
+        if (g_symStrings){ HeapFree(GetProcessHeap(), 0, g_symStrings);g_symStrings = NULL; }
+        return;
+    }
+
+    /* Pass 2: parse lines and populate arrays */
+    DWORD fi = 0, pi = 0, so = 0;
+    {
+        char* p = rawBuf;
+        while (*p) {
+            char* lineEnd = strchr(p, '\n');
+            if (!lineEnd) lineEnd = p + strlen(p);
+            /* Strip \r if present */
+            char* lineEndClean = lineEnd;
+            if (lineEndClean > p && *(lineEndClean - 1) == '\r')
+                lineEndClean--;
+            char saved = *lineEndClean;
+            *lineEndClean = '\0';
+
+            if (p[0] == 'F' && strncmp(p, "FUNC\t", 5) == 0 && fi < funcCount) {
+                /* FUNC\tname\tRVA\tcodeSize\tparamCount */
+                char* t1 = p + 5;          /* name start */
+                char* t2 = strchr(t1, '\t');
+                if (t2) {
+                    DWORD nameLen = (DWORD)(t2 - t1);
+                    memcpy(g_symStrings + so, t1, nameLen);
+                    g_symStrings[so + nameLen] = '\0';
+                    g_txtFuncs[fi].nameOff = so;
+                    so += nameLen + 1;
+
+                    char* t3 = strchr(t2 + 1, '\t');
+                    g_txtFuncs[fi].rva = (DWORD)strtoul(t2 + 1, NULL, 10);
+                    if (t3) {
+                        char* t4 = strchr(t3 + 1, '\t');
+                        g_txtFuncs[fi].codeSize = (DWORD)strtoul(t3 + 1, NULL, 10);
+                        if (t4) {
+                            g_txtFuncs[fi].paramCount = (WORD)strtoul(t4 + 1, NULL, 10);
+                        }
+                    }
+                    g_txtFuncs[fi].paramStart = (WORD)pi;
+                    fi++;
+                }
+            } else if (p[0] == 'P' && strncmp(p, "PARAM\t", 6) == 0 && pi < paramCount) {
+                /* PARAM\tname\ttype\tstorage */
+                char* t1 = p + 6;          /* name start */
+                char* t2 = strchr(t1, '\t');
+                if (t2) {
+                    DWORD nameLen = (DWORD)(t2 - t1);
+                    memcpy(g_symStrings + so, t1, nameLen);
+                    g_symStrings[so + nameLen] = '\0';
+                    g_txtParams[pi].nameOff = so;
+                    so += nameLen + 1;
+
+                    /* skip type field, go to storage */
+                    char* t3 = strchr(t2 + 1, '\t');
+                    if (t3) {
+                        char* stor = t3 + 1;
+                        if (strncmp(stor, "REG:", 4) == 0) {
+                            g_txtParams[pi].storage = 0;
+                            g_txtParams[pi].regIdx = (BYTE)TxtRegNameToCV(stor + 4);
+                        } else if (strncmp(stor, "STACK:", 6) == 0) {
+                            g_txtParams[pi].storage = 1;
+                            g_txtParams[pi].stackOff = (WORD)atoi(stor + 6);
+                        } else {
+                            g_txtParams[pi].storage = 2; /* UNKNOWN */
+                        }
+                    }
+                    pi++;
+                }
+            }
+
+            *lineEndClean = saved;
+            p = (*lineEnd) ? lineEnd + 1 : lineEnd;
+        }
+    }
+
+    g_txtFuncCount  = fi;
+    g_txtParamCount = pi;
+
+    /* Sort by RVA for binary search */
+    qsort(g_txtFuncs, g_txtFuncCount, sizeof(TxtFunc), TxtFuncCmpRva);
+
+    HeapFree(GetProcessHeap(), 0, rawBuf);
+    g_hasSymbols = TRUE;
+
+    {
+        char msg[128];
+        sprintf_s(msg, sizeof(msg), "symbols.txt loaded: %lu funcs, %lu params",
+                  g_txtFuncCount, g_txtParamCount);
+        InitTrace(msg);
+    }
+}
+
 /* Collect frame params into outBuf as "name=0xval, name=0xval, ..." */
 static void CollectFrameParams(HANDLE hProc, CONTEXT* ctx, STACKFRAME64* frame,
                                char* outBuf, int outBufSize) {
     outBuf[0] = '\0';
-    if (!g_SymSetContext || !g_SymEnumSymbols) return;
 
-    IMAGEHLP_STACK_FRAME imgFrame;
-    memset(&imgFrame, 0, sizeof(imgFrame));
-    imgFrame.InstructionOffset = frame->AddrPC.Offset;
-    imgFrame.FrameOffset       = frame->AddrFrame.Offset;
-    imgFrame.StackOffset       = frame->AddrStack.Offset;
+    /* Try PDB params first */
+    if (g_SymSetContext && g_SymEnumSymbols) {
+        IMAGEHLP_STACK_FRAME imgFrame;
+        memset(&imgFrame, 0, sizeof(imgFrame));
+        imgFrame.InstructionOffset = frame->AddrPC.Offset;
+        imgFrame.FrameOffset       = frame->AddrFrame.Offset;
+        imgFrame.StackOffset       = frame->AddrStack.Offset;
 
-    if (!g_SymSetContext(hProc, &imgFrame, NULL)) return;
+        if (g_SymSetContext(hProc, &imgFrame, NULL)) {
+            EnumParamsCtx ep;
+            ep.ctx        = ctx;
+            ep.hProc      = hProc;
+            ep.paramCount = 0;
+            ep.buf[0]     = '\0';
+            ep.bufPos     = 0;
 
-    EnumParamsCtx ep;
-    ep.ctx        = ctx;
-    ep.hProc      = hProc;
-    ep.paramCount = 0;
-    ep.buf[0]     = '\0';
-    ep.bufPos     = 0;
+            g_SymEnumSymbols(hProc, 0, "*", EnumParamsCallback, &ep);
 
-    g_SymEnumSymbols(hProc, 0, "*", EnumParamsCallback, &ep);
+            if (ep.bufPos > 0 && ep.bufPos < outBufSize) {
+                memcpy(outBuf, ep.buf, ep.bufPos + 1);
+                return;
+            }
+        }
+    }
 
-    if (ep.bufPos > 0 && ep.bufPos < outBufSize)
-        memcpy(outBuf, ep.buf, ep.bufPos + 1);
+    /* Fallback: txt symbols */
+    if (g_txtFuncs) {
+        HMODULE hExe = GetModuleHandleA(NULL);
+        if (hExe) {
+            DWORD rva = (DWORD)(frame->AddrPC.Offset - (DWORD64)hExe);
+            const TxtFunc* func = TxtFindFunc(rva);
+            if (func && func->paramCount > 0)
+                TxtCollectFrameParams(func, ctx, hProc, frame->AddrStack.Offset,
+                                      outBuf, outBufSize);
+        }
+    }
 }
 
-/* Resolve a symbol name for an address (works for PE exports even without PDBs) */
+/* Inner resolve (caller must hold g_dbgHelpLock if using PDB path) */
+static const char* ResolveSymbolInner(HANDLE hProc, DWORD64 addr,
+                                       char* symBuf, size_t symBufSize) {
+    /* Try PDB/dbghelp first */
+    if (g_SymFromAddr) {
+        PSYMBOL_INFO sym = (PSYMBOL_INFO)symBuf;
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen   = (ULONG)(symBufSize - sizeof(SYMBOL_INFO));
+        DWORD64 disp = 0;
+        if (g_SymFromAddr(hProc, addr, &disp, sym))
+            return sym->Name;
+    }
+    /* Fallback: txt symbols */
+    if (g_txtFuncs) {
+        HMODULE hExe = GetModuleHandleA(NULL);
+        if (hExe) {
+            DWORD rva = (DWORD)(addr - (DWORD64)hExe);
+            const TxtFunc* func = TxtFindFunc(rva);
+            if (func)
+                return g_symStrings + func->nameOff;
+        }
+    }
+    return "???";
+}
+
+/* Locking wrapper for use outside the stack trace loop */
 static const char* ResolveSymbol(HANDLE hProc, DWORD64 addr,
                                   char* symBuf, size_t symBufSize) {
-    if (!g_SymFromAddr) return "???";
-    PSYMBOL_INFO sym = (PSYMBOL_INFO)symBuf;
-    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
-    sym->MaxNameLen   = (ULONG)(symBufSize - sizeof(SYMBOL_INFO));
-    DWORD64 disp = 0;
     EnterCriticalSection(&g_dbgHelpLock);
-    BOOL ok = g_SymFromAddr(hProc, addr, &disp, sym);
+    const char* name = ResolveSymbolInner(hProc, addr, symBuf, symBufSize);
     LeaveCriticalSection(&g_dbgHelpLock);
-    return ok ? sym->Name : "???";
+    return name;
 }
 
 static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
@@ -418,15 +769,9 @@ static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
 
         DWORD64 pc = frame.AddrPC.Offset;
 
-        /* Resolve symbol name */
+        /* Resolve symbol name (uses PDB then txt fallback) */
         char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
-        PSYMBOL_INFO sym = (PSYMBOL_INFO)symBuf;
-        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
-        sym->MaxNameLen   = MAX_SYM_NAME;
-        DWORD64 symDisp = 0;
-        const char* funcName = "???";
-        if (g_SymFromAddr && g_SymFromAddr(hProc, pc, &symDisp, sym))
-            funcName = sym->Name;
+        const char* funcName = ResolveSymbolInner(hProc, pc, symBuf, sizeof(symBuf));
 
         /* Collect function parameters */
         char paramsBuf[400] = "";
@@ -996,6 +1341,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         InitializeCriticalSection(&g_dbgHelpLock);
         g_logThread = CreateThread(NULL, 0, LogWriterThread, NULL, 0, &g_logWriterThreadId);
         InitSymbols();
+        LoadSymbolsTxt();
         LogEvent("=== CrashProtector loaded (PID %lu, symbols=%s) ===",
                  GetCurrentProcessId(), g_hasSymbols ? "YES" : "NO");
 
@@ -1028,7 +1374,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         if (g_logEvent) CloseHandle(g_logEvent);
         if (g_logFile != INVALID_HANDLE_VALUE) CloseHandle(g_logFile);
         if (g_logFileArchive != INVALID_HANDLE_VALUE) CloseHandle(g_logFileArchive);
-        if (g_hasSymbols && g_SymCleanup) g_SymCleanup(GetCurrentProcess());
+        if (g_SymCleanup) g_SymCleanup(GetCurrentProcess());
+        if (g_txtFuncs)   HeapFree(GetProcessHeap(), 0, g_txtFuncs);
+        if (g_txtParams)  HeapFree(GetProcessHeap(), 0, g_txtParams);
+        if (g_symStrings) HeapFree(GetProcessHeap(), 0, g_symStrings);
         DeleteCriticalSection(&g_dbgHelpLock);
         if (g_dbgHelp) FreeLibrary(g_dbgHelp);
         if (g_realVersion) FreeLibrary(g_realVersion);
