@@ -624,20 +624,40 @@ static int CreatePDB(const char* exePath, const char* mapPath, const char* pdbPa
     long ec = 0;
     wchar_t errBuf[1024] = {0};
 
+    printf("Calling PDBOpen2W...\n"); fflush(stdout);
     if (!pfnOpen(wPdbPath, "w", &ec, errBuf, sizeof(errBuf)/sizeof(wchar_t), &pdb) || !pdb) {
         fprintf(stderr, "ERROR: PDBOpen2W failed (ec=%ld): %ls\n", ec, errBuf);
         free(sections); free(funcs);
         return 0;
     }
+    printf("PDBOpen2W ok, pdb=%p\n", pdb); fflush(stdout);
 
     /* Verify interface version */
+    printf("Querying interface version...\n"); fflush(stdout);
     int intv = PDB_QueryInterfaceVersion(pdb);
-    printf("PDB interface version: %d\n", intv);
+    printf("PDB interface version: %d\n", intv); fflush(stdout);
 
-    /* Open DBI */
+    /* Probe every vtable index 4..12 with OpenDBI signature */
+    printf("Probing vtable for OpenDBI...\n"); fflush(stdout);
     void* dbi = NULL;
-    if (!PDB_OpenDBI(pdb, NULL, "w", &dbi) || !dbi) {
-        fprintf(stderr, "ERROR: PDB::OpenDBI failed\n");
+    BOOL dbiOk = FALSE;
+    for (int idx = 4; idx <= 12 && !dbiOk; idx++) {
+        dbi = NULL;
+        __try {
+            typedef BOOL (*fn)(void*, const char*, const char*, void**);
+            BOOL r = ((fn)vtbl(pdb)[idx])(pdb, NULL, "w", &dbi);
+            printf("  vtable[%d]: returned %d, dbi=%p\n", idx, r, dbi); fflush(stdout);
+            if (r && dbi) {
+                dbiOk = TRUE;
+                printf("  >>> OpenDBI is at vtable[%d]!\n", idx); fflush(stdout);
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            printf("  vtable[%d]: CRASH 0x%08lX\n", idx, GetExceptionCode()); fflush(stdout);
+        }
+    }
+
+    if (!dbiOk || !dbi) {
+        fprintf(stderr, "ERROR: PDB::OpenDBI not found in vtable\n");
         PDB_Close(pdb);
         free(sections); free(funcs);
         return 0;

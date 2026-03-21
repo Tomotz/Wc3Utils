@@ -173,6 +173,7 @@ def main():
         print(f"\n[1/3] Importing old binary: {old_name}")
         run_ghidra(analyze, work_dir, f"{project_name}/old",
                    "-import", old_binary,
+                   "-overwrite",
                    "-preScript", "ConfigureAnalysis.java",
                    "-scriptPath", script_dir,
                    "-analysisTimeoutPerFile", str(args.timeout),
@@ -181,12 +182,15 @@ def main():
 
     if 2 in steps:
         # Step 2 – import and auto-analyze new binary.
+        # No PDB available so Ghidra must discover functions by disassembly,
+        # which is much slower — use 5 hours by default.
         print(f"\n[2/3] Importing new binary: {new_name}")
         run_ghidra(analyze, work_dir, f"{project_name}/new",
                    "-import", new_binary,
+                   "-overwrite",
                    "-preScript", "ConfigureAnalysis.java",
                    "-scriptPath", script_dir,
-                   "-analysisTimeoutPerFile", str(args.timeout),
+                   "-analysisTimeoutPerFile",
                    timeout=args.timeout)
         print(f"  Step 2 complete. Project saved in: {work_dir}")
 
