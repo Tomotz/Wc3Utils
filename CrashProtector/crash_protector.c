@@ -2,8 +2,9 @@
  * WC3 CrashProtector - Prevents crashes from invalid pointer access (x64)
  *
  * Loads as a version.dll proxy into WC3 Reforged's process.
- * Installs a Vectored Exception Handler that catches
- * access violations, skips the faulting instruction, and logs the event.
+ * Uses an Unhandled Exception Filter (UEF) to catch only truly unhandled
+ * access violations — the game's own SEH handlers run first, so intentional
+ * AVs (page probes, etc.) are left alone.
  *
  * The .def file forwards all real version.dll exports by loading
  * the original system version.dll from System32 at runtime.
@@ -78,7 +79,17 @@ static void InitSymbols(void) {
     }
 
     HANDLE hProc = GetCurrentProcess();
-    if (!g_SymInitialize(hProc, NULL, TRUE)) return;
+
+    /* Build search path from the EXE's directory so DbgHelp can find
+       PDBs placed next to the game executable (the working directory
+       is often somewhere else when launched via Battle.net). */
+    char searchPath[MAX_PATH] = {0};
+    if (GetModuleFileNameA(NULL, searchPath, MAX_PATH)) {
+        char *slash = strrchr(searchPath, '\\');
+        if (slash) *slash = '\0';
+    }
+
+    if (!g_SymInitialize(hProc, searchPath[0] ? searchPath : NULL, TRUE)) return;
 
     /* Probe: check if the main executable (wc3.exe) has symbols loaded. */
     /* The entry point is a known valid address inside the EXE. */
@@ -158,8 +169,8 @@ static DWORD WINAPI LogWriterThread(LPVOID param) {
     while (!g_logShutdown) {
         WaitForSingleObject(g_logEvent, 500); /* wake on signal or periodic flush */
 
-        /* Create archive log once we hit 2 crashes or a hang is detected */
-        if (g_logFileArchive == INVALID_HANDLE_VALUE && (g_crashesSaved >= 2 || g_hangDetected))
+        /* Create archive log on first crash or hang */
+        if (g_logFileArchive == INVALID_HANDLE_VALUE && (g_crashesSaved >= 1 || g_hangDetected))
             OpenArchiveLog();
 
         while (g_logTail != g_logHead) {
@@ -479,25 +490,30 @@ static DWORD64* GetRegFromContext(CONTEXT* ctx, BYTE regIdx) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Vectored Exception Handler                                        */
+/*  Unhandled Exception Filter                                        */
 /* ------------------------------------------------------------------ */
 
-static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
-    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
-    BOOL bailEarly = FALSE;
+static LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = NULL;
 
-    /* ExceptionInformation[0]: 0 = read, 1 = write, 8 = DEP */
-    /* ExceptionInformation[1]: the address that was accessed  */
+/* Only reached for access violations that
+   no SEH handler caught (i.e., real crashes, not intentional AVs).
+   Installed from the watchdog thread after game init is complete. */
+static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
+        return g_prevFilter ? g_prevFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
+    }
+
     ULONG_PTR accessType = ep->ExceptionRecord->ExceptionInformation[0];
     ULONG_PTR addr = ep->ExceptionRecord->ExceptionInformation[1];
     CONTEXT* ctx = ep->ContextRecord;
-
     const char* accessName = (accessType == 8) ? "EXECUTE" : (accessType == 0) ? "READ" : "WRITE";
 
     LONG count = InterlockedIncrement(&g_crashesSaved);
 
-    LogEvent("ACCESS_VIOLATION #%ld: %s addr=0x%016llX RIP=0x%016llX", count, accessName, (unsigned long long)addr, (unsigned long long)ctx->Rip);
+    LogEvent("ACCESS_VIOLATION #%ld: %s addr=0x%016llX RIP=0x%016llX",
+             count, accessName, (unsigned long long)addr, (unsigned long long)ctx->Rip);
 
+    BOOL bailEarly = FALSE;
     hde64s hs;
     unsigned int instrLen = 0;
     DWORD64 retAddr = 0;
@@ -533,7 +549,7 @@ static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
             bailEarly = TRUE;
         }
 
-        /* Resolve RIP module (meaningful for read/write; RIP is outside any module for execute) */
+        /* Resolve RIP module */
         HMODULE hFaultMod = NULL;
         char modName[MAX_PATH] = "???";
         DWORD64 modOffset = 0;
@@ -551,12 +567,11 @@ static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
     LogRegsAndStackTrace(ctx, GetCurrentThread());
 
     if (bailEarly) {
-        return EXCEPTION_CONTINUE_SEARCH;
+        return g_prevFilter ? g_prevFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
     }
 
     // Try fixing what is wrong
     if (accessType == 8) {
-        // Jump to return address, and fix stack.
         ctx->Rip = retAddr;
         ctx->Rsp += 8;
         ctx->Rax = 0;
@@ -570,12 +585,11 @@ static LONG CALLBACK InvalidAccessHandler(PEXCEPTION_POINTERS ep) {
                 if (reg) *reg = 0;
             }
         }
-        // Skip current instruction
         ctx->Rip += instrLen;
     }
 
-    /* Show a window popup message on the 2nd event, and on the 20th */
-    if (count == 2 || count == 20) {
+    /* Show a window popup message on the 1st event, and on the 20th */
+    if (count == 1 || count == 20) {
         char msg[300];
         sprintf_s(msg, sizeof(msg),
                   "CrashProtector: Saved from crashing.\n"
@@ -880,6 +894,11 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     LogEvent("Watchdog: found game window (HWND=0x%llX, tid=%lu)",
              (unsigned long long)(ULONG_PTR)hwnd, g_mainThreadId);
 
+    /* Install UEF now that game init is complete.
+       This captures the game's filter for chaining on non-AV exceptions. */
+    g_prevFilter = SetUnhandledExceptionFilter(UnhandledCrashHandler);
+    LogEvent("Crash recovery filter installed");
+
     // /* For signature copying - dump the unprotected game exe to file so the data is not encrypted */
     // DumpDecryptedExe();
 
@@ -980,12 +999,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         LogEvent("=== CrashProtector loaded (PID %lu, symbols=%s) ===",
                  GetCurrentProcessId(), g_hasSymbols ? "YES" : "NO");
 
-        /* Install the exception handler (priority = last/ Let other handler handle this first) */
-        if (AddVectoredExceptionHandler(0, InvalidAccessHandler)) {
-            LogEvent("Vectored exception handler installed successfully");
-        } else {
-            LogEvent("ERROR: Failed to install exception handler!");
-        }
+        /* UEF is installed from the watchdog thread after game init,
+           so we install after the game's own filter */
 
         LogEvent("Ready - monitoring for invalid pointer access violations");
 
