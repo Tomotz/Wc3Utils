@@ -58,11 +58,33 @@ echo.
 echo Installing CrashProtector to: %WC3DIR%
 echo.
 
+REM Delete the old version.dll first so we know the copy is fresh
+echo Removing old version.dll from WC3 directory...
+if exist "%WC3DIR%\version.dll" (
+    del /F "%WC3DIR%\version.dll" >nul 2>&1
+    if exist "%WC3DIR%\version.dll" (
+        echo ERROR: Could not remove old version.dll. Make sure WC3 is not running. Try running as Administrator.
+        echo The local version.dll was built successfully and can be copied manually:
+        echo   copy /Y "version.dll" "%WC3DIR%\version.dll"
+        exit /b 1
+    )
+)
+
 REM Copy our proxy version.dll
 echo Copying CrashProtector version.dll...
 copy /Y "version.dll" "%WC3DIR%\version.dll" >nul
 if %ERRORLEVEL% NEQ 0 (
-    echo ERROR: Could not copy. Make sure WC3 is not running. Try running as Administrator.
+    echo ERROR: Copy failed. Make sure WC3 is not running. Try running as Administrator.
+    echo The local version.dll was built successfully and can be copied manually:
+    echo   copy /Y "version.dll" "%WC3DIR%\version.dll"
+    exit /b 1
+)
+
+REM Verify the copy actually landed
+if not exist "%WC3DIR%\version.dll" (
+    echo ERROR: version.dll not found in WC3 directory after copy.
+    echo The local version.dll was built successfully and can be copied manually:
+    echo   copy /Y "version.dll" "%WC3DIR%\version.dll"
     exit /b 1
 )
 echo       Done.
