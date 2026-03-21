@@ -804,93 +804,72 @@ static void LogMainThreadLocation(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Hang Recovery via Stack Unwinding                                  */
+/*  Memory Dumper — dump decrypted .text section to disk - this is just for signature copying, it's unrelated to the crash protection and is not needed for most users               */
 /* ------------------------------------------------------------------ */
 
-#define HANG_RECOVERY_THRESHOLD 7   /* sampling ticks before attempting recovery */
-#define HANG_UNWIND_FRAMES      15
+static void DumpDecryptedExe(void) {
+    HMODULE hExe = GetModuleHandleA(NULL);
+    if (!hExe) return;
 
-typedef PRUNTIME_FUNCTION (WINAPI *pfnRtlLookupFunctionEntry)(
-    DWORD64 ControlPc, PDWORD64 ImageBase, PVOID HistoryTable);
-typedef PEXCEPTION_ROUTINE (WINAPI *pfnRtlVirtualUnwind)(
-    DWORD HandlerType, DWORD64 ImageBase, DWORD64 ControlPc,
-    PRUNTIME_FUNCTION FunctionEntry, PCONTEXT ContextRecord,
-    PVOID *HandlerData, PDWORD64 EstablisherFrame, PVOID ContextPointers);
+    /* Get the path to the original exe on disk */
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(hExe, exePath, MAX_PATH);
 
-static BOOL AttemptHangRecovery(void) {
-    HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
-                                FALSE, g_mainThreadId);
-    if (!hThread) return FALSE;
+    /* Read the entire original file */
+    HANDLE hSrc = CreateFileA(exePath, GENERIC_READ, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hSrc == INVALID_HANDLE_VALUE) {
+        LogEvent("ERROR: Cannot open original exe: %s (err=%lu)", exePath, GetLastError());
+        return;
+    }
+    DWORD fileSize = GetFileSize(hSrc, NULL);
+    BYTE* fileBuf = (BYTE*)HeapAlloc(GetProcessHeap(), 0, fileSize);
+    if (!fileBuf) { CloseHandle(hSrc); return; }
+    DWORD bytesRead;
+    ReadFile(hSrc, fileBuf, fileSize, &bytesRead, NULL);
+    CloseHandle(hSrc);
 
-    BOOL recovered = FALSE;
+    /* Parse the file's PE headers */
+    IMAGE_DOS_HEADER* fDos = (IMAGE_DOS_HEADER*)fileBuf;
+    IMAGE_NT_HEADERS* fNt  = (IMAGE_NT_HEADERS*)(fileBuf + fDos->e_lfanew);
+    IMAGE_SECTION_HEADER* fSec = IMAGE_FIRST_SECTION(fNt);
+    WORD numSec = fNt->FileHeader.NumberOfSections;
 
-    if (SuspendThread(hThread) != (DWORD)-1) {
-        CONTEXT ctx;
-        memset(&ctx, 0, sizeof(ctx));
-        ctx.ContextFlags = CONTEXT_FULL;
+    /* Only overwrite .text with decrypted in-memory content.
+       Other sections (rdata, data, etc.) stay from the original file — they
+       weren't encrypted, and in memory they've been relocated by ASLR
+       which would break PDB address matching. */
+    for (WORD i = 0; i < numSec; i++) {
+        if (memcmp(fSec[i].Name, ".text", 5) != 0) continue;
+        if (fSec[i].SizeOfRawData == 0) continue;
 
-        if (GetThreadContext(hThread, &ctx)) {
-            HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-            pfnRtlLookupFunctionEntry pLookup = (pfnRtlLookupFunctionEntry)
-                GetProcAddress(hNtdll, "RtlLookupFunctionEntry");
-            pfnRtlVirtualUnwind pUnwind = (pfnRtlVirtualUnwind)
-                GetProcAddress(hNtdll, "RtlVirtualUnwind");
+        BYTE* memData = (BYTE*)hExe + fSec[i].VirtualAddress;
+        DWORD copySize = fSec[i].SizeOfRawData;
+        if (fSec[i].Misc.VirtualSize < copySize)
+            copySize = fSec[i].Misc.VirtualSize;
 
-            if (pLookup && pUnwind) {
-                LogEvent("HANG RECOVERY: unwinding %d frames from RIP=0x%016llX",
-                         HANG_UNWIND_FRAMES, (unsigned long long)ctx.Rip);
+        memcpy(fileBuf + fSec[i].PointerToRawData, memData, copySize);
 
-                BOOL unwindOk = TRUE;
-                for (int i = 0; i < HANG_UNWIND_FRAMES; i++) {
-                    DWORD64 imageBase = 0;
-                    PRUNTIME_FUNCTION funcEntry = pLookup(ctx.Rip, &imageBase, NULL);
-                    if (!funcEntry) {
-                        LogEvent("  frame %d: no unwind info at RIP=0x%016llX, aborting",
-                                 i, (unsigned long long)ctx.Rip);
-                        unwindOk = FALSE;
-                        break;
-                    }
-
-                    PVOID handlerData = NULL;
-                    DWORD64 establisher = 0;
-                    pUnwind(0 /*UNW_FLAG_NHANDLER*/, imageBase, ctx.Rip,
-                            funcEntry, &ctx, &handlerData, &establisher, NULL);
-
-                    /* Log where we landed */
-                    HMODULE hMod = NULL;
-                    char modName[MAX_PATH] = "???";
-                    GetModuleHandleExA(
-                        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                        (LPCSTR)(ULONG_PTR)ctx.Rip, &hMod);
-                    if (hMod) GetModuleFileNameA(hMod, modName, MAX_PATH);
-
-                    char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
-                    const char* symName = ResolveSymbol(GetCurrentProcess(), ctx.Rip,
-                                                        symBuf, sizeof(symBuf));
-                    LogEvent("  frame %d -> RIP=0x%016llX (%s) %s",
-                             i, (unsigned long long)ctx.Rip, symName, modName);
-                }
-
-                if (unwindOk) {
-                    ctx.Rax = 0; /* return failure / empty result */
-                    if (SetThreadContext(hThread, &ctx)) {
-                        LogEvent("HANG RECOVERY: context set (RAX=0), resuming thread");
-                        recovered = TRUE;
-                    } else {
-                        LogEvent("HANG RECOVERY: SetThreadContext failed (err=%lu)",
-                                 GetLastError());
-                    }
-                }
-            } else {
-                LogEvent("HANG RECOVERY: RtlVirtualUnwind not available");
-            }
-        }
-
-        ResumeThread(hThread);
+        LogEvent("  Patched %.8s: FileOff=0x%X Size=0x%X",
+                 fSec[i].Name, fSec[i].PointerToRawData, copySize);
     }
 
-    CloseHandle(hThread);
-    return recovered;
+    /* Write the patched exe */
+    char dumpPath[MAX_PATH];
+    sprintf_s(dumpPath, MAX_PATH, "%s\\wc3_decrypted.exe", g_logDir);
+
+    HANDLE hDst = CreateFileA(dumpPath, GENERIC_WRITE, 0, NULL,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hDst != INVALID_HANDLE_VALUE) {
+        DWORD written;
+        WriteFile(hDst, fileBuf, fileSize, &written, NULL);
+        CloseHandle(hDst);
+        LogEvent("Dumped decrypted exe: %s (%lu bytes)", dumpPath, written);
+    } else {
+        LogEvent("ERROR: Failed to create dump file (err=%lu)", GetLastError());
+    }
+
+    HeapFree(GetProcessHeap(), 0, fileBuf);
 }
 
 static DWORD WINAPI WatchdogThread(LPVOID param) {
@@ -908,14 +887,15 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     LogEvent("Watchdog: found game window (HWND=0x%llX, tid=%lu)",
              (unsigned long long)(ULONG_PTR)hwnd, g_mainThreadId);
 
+    // /* For signature copying - dump the unprotected game exe to file so the data is not encrypted */
+    // DumpDecryptedExe();
+
     BOOL hangDumped = FALSE;
     DWORD lastDumpTime = 0;
     DWORD hangStartTime = 0;
-    int recoveryCount = 0;
     int hangTickCount = 0;
     #define HANG_DUMP_COOLDOWN_MS 60000
     #define HANG_MONITOR_DURATION_MS 60000  /* sample main thread for 1 min then go quiet */
-    #define RECOVERY_THRESHOLD 2  /* consecutive OK responses before declaring recovery */
 
     while (!g_watchdogShutdown) {
         Sleep(WATCHDOG_INTERVAL_MS);
@@ -934,17 +914,11 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
         if (ok != 0) {
             /* Genuine response from the message loop */
             if (hangDumped) {
-                recoveryCount++;
-                if (recoveryCount >= RECOVERY_THRESHOLD) {
-                    LogEvent("Watchdog: main thread recovered (%d consecutive responses)",
-                             recoveryCount);
-                    hangDumped = FALSE;
-                    recoveryCount = 0;
-                }
+                LogEvent("Watchdog: main thread recovered");
+                hangDumped = FALSE;
             }
         } else {
             /* SendMessageTimeout failed — treat any failure as hung */
-            recoveryCount = 0;
             DWORD now = GetTickCount();
 
             if (!hangDumped) {
@@ -964,11 +938,6 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
                 /* Ongoing hang — sample main thread location for up to 1 minute */
                 hangTickCount++;
                 LogMainThreadLocation();
-
-                if (hangTickCount == HANG_RECOVERY_THRESHOLD) {
-                    if (AttemptHangRecovery())
-                        LogEvent("Watchdog: hang recovery attempted, monitoring for result");
-                }
             } else if (hangTickCount > 0) {
                 /* Past 1 minute — log once that we're going quiet */
                 LogEvent("Watchdog: still hung after %lus, stopping periodic samples",
@@ -1028,9 +997,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         LogEvent("Ready - monitoring for invalid pointer access violations");
 
         /* Start the hang-detection watchdog */
-        g_watchdogThread = CreateThread(NULL, 0, WatchdogThread, NULL, 0, &g_watchdogThreadId);
-        if (g_watchdogThread)
-            LogEvent("Watchdog thread started");
+        // g_watchdogThread = CreateThread(NULL, 0, WatchdogThread, NULL, 0, &g_watchdogThreadId);
+        // if (g_watchdogThread)
+        //     LogEvent("Watchdog thread started");
     } else if (reason == DLL_PROCESS_DETACH) {
         LogEvent("=== CrashProtector unloading. Total crashes reported: %ld ===", g_crashesSaved);
 
