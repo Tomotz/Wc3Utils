@@ -838,6 +838,25 @@ static DWORD64* GetRegFromContext(CONTEXT* ctx, BYTE regIdx) {
 /*  Unhandled Exception Filter                                        */
 /* ------------------------------------------------------------------ */
 
+/* Resolve the module containing `rip` and log it.
+   Returns TRUE if the address belongs to a known module. */
+static BOOL LogRipModule(DWORD64 rip) {
+    HMODULE hMod = NULL;
+    char modName[MAX_PATH] = "???";
+    DWORD64 modOffset = 0;
+    GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCSTR)(ULONG_PTR)rip, &hMod);
+    if (hMod) {
+        GetModuleFileNameA(hMod, modName, MAX_PATH);
+        modOffset = rip - (DWORD64)hMod;
+    }
+    char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+    const char* symName = ResolveSymbol(GetCurrentProcess(), rip, symBuf, sizeof(symBuf));
+    LogEvent(" Module: %s +0x%llX (%s)", modName, (unsigned long long)modOffset, symName);
+    return hMod != NULL;
+}
+
 static LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = NULL;
 
 /* Only reached for access violations that
@@ -845,6 +864,11 @@ static LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = NULL;
    Installed from the watchdog thread after game init is complete. */
 static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
+        LogEvent("UNHANDLED_EXCEPTION: code=0x%08lX RIP=0x%016llX (not an AV, cannot fix)",
+                 (unsigned long)ep->ExceptionRecord->ExceptionCode,
+                 (unsigned long long)ep->ContextRecord->Rip);
+        LogRipModule(ep->ContextRecord->Rip);
+        LogRegsAndStackTrace(ep->ContextRecord, GetCurrentThread());
         return g_prevFilter ? g_prevFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
     }
 
@@ -869,21 +893,12 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
         if (!SafeRead(GetCurrentProcess(), ctx->Rsp, &retAddr, sizeof(retAddr)) || retAddr == 0) {
             LogEvent("  Recovery: no valid return address on stack, cannot recover");
             bailEarly = TRUE;
+        } else if (!LogRipModule(retAddr)) {
+            LogEvent("  Recovery: return address 0x%016llX not inside any module, cannot recover",
+                    (unsigned long long)retAddr);
+            bailEarly = TRUE;
         } else {
-            HMODULE hRetMod = NULL;
-            GetModuleHandleExA(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                (LPCSTR)(ULONG_PTR)retAddr, &hRetMod);
-            if (!hRetMod) {
-                LogEvent("  Recovery: return address 0x%016llX not inside any module, cannot recover",
-                        (unsigned long long)retAddr);
-                bailEarly = TRUE;
-            } else {
-                char retModName[MAX_PATH];
-                GetModuleFileNameA(hRetMod, retModName, MAX_PATH);
-                LogEvent("  Recovery: simulating ret to 0x%016llX (%s +0x%llX)",
-                        (unsigned long long)retAddr, retModName, (unsigned long long)(retAddr - (DWORD64)hRetMod));
-            }
+            LogEvent("  Recovery: simulating ret to 0x%016llX", (unsigned long long)retAddr);
         }
     } else {
         /* For read/write, decode the faulting instruction first (bail early if we can't) */
@@ -894,20 +909,7 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
             bailEarly = TRUE;
         }
 
-        /* Resolve RIP module */
-        HMODULE hFaultMod = NULL;
-        char modName[MAX_PATH] = "???";
-        DWORD64 modOffset = 0;
-        GetModuleHandleExA(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            (LPCSTR)(ULONG_PTR)ctx->Rip, &hFaultMod);
-        if (hFaultMod) {
-            GetModuleFileNameA(hFaultMod, modName, MAX_PATH);
-            modOffset = ctx->Rip - (DWORD64)hFaultMod;
-            char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
-            const char* symName = ResolveSymbol(GetCurrentProcess(), ctx->Rip, symBuf, sizeof(symBuf));
-            LogEvent("  Module: %s +0x%llX (%s) instrLen=%u", modName, (unsigned long long)modOffset, symName, instrLen);
-        }
+        LogRipModule(ctx->Rip);
     }
     LogRegsAndStackTrace(ctx, GetCurrentThread());
 
