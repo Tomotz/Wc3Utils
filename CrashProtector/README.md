@@ -1,17 +1,17 @@
-# WC3 CrashProtector
+# WC3 CrashProtector v1.0.0
 
 A DLL proxy that prevents Warcraft III Reforged from crashing due to invalid pointer access violations, and detects hangs.
 
 ## What It Does
 
-There are a few main reasons that players drop undesireably from games:
- - Network disconnects - there was no connectivy between host and client and game drops the player. This used to be mitigate in classic by the 45 seconds grace period before a player is kicked, but no longer. I think these looks like the player just exits to scoreboard window.
- - Desync - there is a difference between players in how they see the game state (some unit exist for one player and not the other). Game notices and desyncs one of the players to avoid inconncistancy. If a desync happened, you will see a desync log under \Documents\Warcraft III\Errors
+There are a few main reasons that players drop undesirably from games:
+ - Network disconnects - there was no connectivity between host and client and game drops the player. This used to be mitigate in classic by the 45 seconds grace period before a player is kicked, but no longer. I think these looks like the player just exits to scoreboard window.
+ - Desync - there is a difference between players in how they see the game state (some unit exist for one player and not the other). Game notices and desyncs one of the players to avoid inconsistency. If a desync happened, you will see a desync log under \Documents\Warcraft III\Errors
  - Crashes - error in the application caused the game to crash and close. When these happen you will see a Crash log under \Documents\Warcraft III\Errors that will also state the reason for the crash.
  - Freezes - A very heavy compute is causing the application to hang. Can be an infinite loop, or just a very very long one that is intensive enough to make the process. When this happens the game window will freeze, and windows will offer to restart it.
 
  In this project we try to avoid crashes and make crashes and freezes more informative (allowing you to classify them, and possibly even understand what caused them).
- This project only handles access violation crashes (which are the most common crash in the games I played). It will not solve or log any other type of crash.
+ This project only handles freezes and access violation crashes (which are the most common crash in the games I played). It will not solve or log any other type of crash.
 
 **Crash protection** — intercepts unhandled access violation exceptions and safely recovers:
 - Detecting when the game tries to read/write/execute invalid memory addresses
@@ -22,7 +22,7 @@ There are a few main reasons that players drop undesireably from games:
 
 **Hang detection** — a watchdog thread monitors the game's main thread and logs diagnostics (all thread stacks) when it stops responding.
 
-**Logging** — all crashes and hangs are logged to `Documents\CrashProtector\crash_protector.log` with register dumps, and module info. If symbols are available, will also generat stack traces and function args. Notification balloons appear on the 1st and 20th saved crash, and when a hang is detected to let the user know.
+**Logging** — all crashes and hangs are logged to `Documents\CrashProtector\crash_protector.log` with register dumps, and module info. If symbols are available, will also generate stack traces and function args. Notification balloons appear on the 1st and 20th saved crash, and when a hang is detected to let the user know.
 
 Only truly unhandled exceptions are caught — the game's own exception handlers (`__try/__except`) run first and are not interfered with.
 
