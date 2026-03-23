@@ -219,7 +219,7 @@ static DWORD WINAPI LogWriterThread(LPVOID param) {
     return 0;
 }
 
-static void LogEvent(const char* fmt, ...) {
+static void LogEventV(BOOL withTime, const char* fmt, va_list args) {
     /* Grab a slot - if ring is full, drop the message (never block the game) */
     LONG head, next;
     do {
@@ -231,18 +231,34 @@ static void LogEvent(const char* fmt, ...) {
 
     LONG slot = head & (LOG_RING_SIZE - 1);
 
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    int prefix = sprintf_s(g_logRing[slot], LOG_ENTRY_SIZE,
-        "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    int prefix = 0;
+    if (withTime) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        prefix = sprintf_s(g_logRing[slot], LOG_ENTRY_SIZE,
+            "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    }
 
-    va_list args;
-    va_start(args, fmt);
     vsprintf_s(g_logRing[slot] + prefix, LOG_ENTRY_SIZE - prefix, fmt, args);
-    va_end(args);
 
     /* Signal the writer thread */
     if (g_logEvent) SetEvent(g_logEvent);
+}
+
+/* Log with timestamp (first message in a batch) */
+static void LogWithTimeStamp(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    LogEventV(TRUE, fmt, args);
+    va_end(args);
+}
+
+/* Log without timestamp (continuation lines in a batch) */
+static void LogLine(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    LogEventV(FALSE, fmt, args);
+    va_end(args);
 }
 
 void ShowBalloon(const char* title, const char* message)
@@ -738,7 +754,7 @@ static const char* ResolveSymbol(HANDLE hProc, DWORD64 addr,
 
 static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
     /* Registers + stack trace (shared) */
-    LogEvent("  RAX=%016llX RBX=%016llX RCX=%016llX RDX=%016llX RSI=%016llX RDI=%016llX RBP=%016llX RSP=%016llX R8 =%016llX R9 =%016llX R10=%016llX R11=%016llX R12=%016llX R13=%016llX R14=%016llX R15=%016llX", ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->Rbp, ctx->Rsp, ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13, ctx->R14, ctx->R15);
+    LogLine("  RAX=%016llX RBX=%016llX RCX=%016llX RDX=%016llX RSI=%016llX RDI=%016llX RBP=%016llX RSP=%016llX R8 =%016llX R9 =%016llX R10=%016llX R11=%016llX R12=%016llX R13=%016llX R14=%016llX R15=%016llX", ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->Rbp, ctx->Rsp, ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13, ctx->R14, ctx->R15);
 
     if (!g_hasSymbols) return;
 
@@ -755,7 +771,7 @@ static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
     frame.AddrStack.Offset = ctxCopy.Rsp;
     frame.AddrStack.Mode   = AddrModeFlat;
 
-    LogEvent("  --- Stack Trace (Newest first) ---");
+    LogLine("  --- Stack Trace (Newest first) ---");
 
     EnterCriticalSection(&g_dbgHelpLock);
 
@@ -782,10 +798,10 @@ static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
         line.SizeOfStruct = sizeof(line);
         DWORD lineDisp = 0;
         if (g_SymGetLineFromAddr64 && g_SymGetLineFromAddr64(hProc, pc, &lineDisp, &line))
-            LogEvent("  #0x%x  0x%llx in %s (%s) at %s:%lu", i, (unsigned long long)pc,
+            LogLine("  #0x%x  0x%llx in %s (%s) at %s:%lu", i, (unsigned long long)pc,
                      funcName, paramsBuf, line.FileName, line.LineNumber);
         else
-            LogEvent("  #0x%x  0x%llx in %s (%s)", i, (unsigned long long)pc,
+            LogLine("  #0x%x  0x%llx in %s (%s)", i, (unsigned long long)pc,
                      funcName, paramsBuf);
     }
 
@@ -853,7 +869,7 @@ static BOOL LogRipModule(DWORD64 rip) {
     }
     char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
     const char* symName = ResolveSymbol(GetCurrentProcess(), rip, symBuf, sizeof(symBuf));
-    LogEvent(" Module: %s +0x%llX (%s)", modName, (unsigned long long)modOffset, symName);
+    LogLine(" Module: %s +0x%llX (%s)", modName, (unsigned long long)modOffset, symName);
     return hMod != NULL;
 }
 
@@ -864,7 +880,7 @@ static LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = NULL;
    Installed from the watchdog thread after game init is complete. */
 static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
-        LogEvent("UNHANDLED_EXCEPTION: code=0x%08lX RIP=0x%016llX (not an AV, cannot fix)",
+        LogWithTimeStamp("UNHANDLED_EXCEPTION: code=0x%08lX RIP=0x%016llX (not an AV, cannot fix)",
                  (unsigned long)ep->ExceptionRecord->ExceptionCode,
                  (unsigned long long)ep->ContextRecord->Rip);
         LogRipModule(ep->ContextRecord->Rip);
@@ -879,7 +895,7 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
 
     LONG count = InterlockedIncrement(&g_crashesSaved);
 
-    LogEvent("ACCESS_VIOLATION #%ld: %s addr=0x%016llX RIP=0x%016llX",
+    LogWithTimeStamp("ACCESS_VIOLATION #%ld: %s addr=0x%016llX RIP=0x%016llX",
              count, accessName, (unsigned long long)addr, (unsigned long long)ctx->Rip);
 
     BOOL bailEarly = FALSE;
@@ -891,21 +907,21 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
     if (accessType == 8) {
         /* EXECUTE: simulate ret if return address is inside a known module */
         if (!SafeRead(GetCurrentProcess(), ctx->Rsp, &retAddr, sizeof(retAddr)) || retAddr == 0) {
-            LogEvent("  Recovery: no valid return address on stack, cannot recover");
+            LogLine("  Recovery: no valid return address on stack, cannot recover");
             bailEarly = TRUE;
         } else if (!LogRipModule(retAddr)) {
-            LogEvent("  Recovery: return address 0x%016llX not inside any module, cannot recover",
+            LogLine("  Recovery: return address 0x%016llX not inside any module, cannot recover",
                     (unsigned long long)retAddr);
             bailEarly = TRUE;
         } else {
-            LogEvent("  Recovery: simulating ret to 0x%016llX", (unsigned long long)retAddr);
+            LogLine("  Recovery: simulating ret to 0x%016llX", (unsigned long long)retAddr);
         }
     } else {
         /* For read/write, decode the faulting instruction first (bail early if we can't) */
         instrLen = hde64_disasm((BYTE*)ctx->Rip, &hs);
         if (instrLen == 0 || (hs.flags & F_ERROR))
         {
-            LogEvent("  Failed to decode instruction at RIP, cannot analyze or recover");
+            LogLine("  Failed to decode instruction at RIP, cannot analyze or recover");
             bailEarly = TRUE;
         }
 
@@ -1064,7 +1080,7 @@ static void LogThreadInfo(DWORD threadId, HANDLE hThread, CONTEXT* ctx) {
     const char* marker = (threadId == g_mainThreadId) ? " [MAIN]" :
                          inGameExe ? " [GAME CODE]" : "";
 
-    LogEvent("  Thread %lu%s: RIP=0x%016llX %s +0x%llX (%s)",
+    LogLine("  Thread %lu%s: RIP=0x%016llX %s +0x%llX (%s)",
              threadId, marker,
              (unsigned long long)rip, modName,
              (unsigned long long)modOffset, symName);
@@ -1079,11 +1095,11 @@ static void DumpAllThreadStacks(void) {
     DWORD pid = GetCurrentProcessId();
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (snap == INVALID_HANDLE_VALUE) {
-        LogEvent("Watchdog: failed to create thread snapshot");
+        LogWithTimeStamp("Watchdog: failed to create thread snapshot");
         return;
     }
 
-    LogEvent("=== Hang Diagnostic: All Thread Stacks ===");
+    LogWithTimeStamp("=== Hang Diagnostic: All Thread Stacks ===");
 
     THREADENTRY32 te;
     te.dwSize = sizeof(te);
@@ -1108,7 +1124,7 @@ static void DumpAllThreadStacks(void) {
                 if (GetThreadContext(hThread, &ctx)) {
                     LogThreadInfo(tid, hThread, &ctx);
                 } else {
-                    LogEvent("  Thread %lu: failed to get context (err=%lu)", tid, GetLastError());
+                    LogLine("  Thread %lu: failed to get context (err=%lu)", tid, GetLastError());
                 }
 
                 ResumeThread(hThread);
@@ -1119,7 +1135,7 @@ static void DumpAllThreadStacks(void) {
     }
 
     CloseHandle(snap);
-    LogEvent("=== End Hang Diagnostic ===");
+    LogLine("=== End Hang Diagnostic ===");
 }
 
 /* Sample and log just the main thread's current RIP (module + symbol). */
@@ -1147,7 +1163,7 @@ static void LogMainThreadLocation(void) {
             }
             char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
             const char* symName = ResolveSymbol(GetCurrentProcess(), rip, symBuf, sizeof(symBuf));
-            LogEvent("  Thread %lu [MAIN]: RIP=0x%016llX %s +0x%llX (%s)",
+            LogWithTimeStamp("  Thread %lu [MAIN]: RIP=0x%016llX %s +0x%llX (%s)",
                      g_mainThreadId,
                      (unsigned long long)rip, modName,
                      (unsigned long long)modOffset, symName);
@@ -1173,7 +1189,7 @@ static void DumpDecryptedExe(void) {
     HANDLE hSrc = CreateFileA(exePath, GENERIC_READ, FILE_SHARE_READ, NULL,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hSrc == INVALID_HANDLE_VALUE) {
-        LogEvent("ERROR: Cannot open original exe: %s (err=%lu)", exePath, GetLastError());
+        LogWithTimeStamp("ERROR: Cannot open original exe: %s (err=%lu)", exePath, GetLastError());
         return;
     }
     DWORD fileSize = GetFileSize(hSrc, NULL);
@@ -1204,7 +1220,7 @@ static void DumpDecryptedExe(void) {
 
         memcpy(fileBuf + fSec[i].PointerToRawData, memData, copySize);
 
-        LogEvent("  Patched %.8s: FileOff=0x%X Size=0x%X",
+        LogLine("  Patched %.8s: FileOff=0x%X Size=0x%X",
                  fSec[i].Name, fSec[i].PointerToRawData, copySize);
     }
 
@@ -1218,9 +1234,9 @@ static void DumpDecryptedExe(void) {
         DWORD written;
         WriteFile(hDst, fileBuf, fileSize, &written, NULL);
         CloseHandle(hDst);
-        LogEvent("Dumped decrypted exe: %s (%lu bytes)", dumpPath, written);
+        LogLine("Dumped decrypted exe: %s (%lu bytes)", dumpPath, written);
     } else {
-        LogEvent("ERROR: Failed to create dump file (err=%lu)", GetLastError());
+        LogLine("ERROR: Failed to create dump file (err=%lu)", GetLastError());
     }
 
     HeapFree(GetProcessHeap(), 0, fileBuf);
@@ -1238,13 +1254,13 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     }
     if (!hwnd) return 0;
 
-    LogEvent("Watchdog: found game window (HWND=0x%llX, tid=%lu)",
+    LogWithTimeStamp("Watchdog: found game window (HWND=0x%llX, tid=%lu)",
              (unsigned long long)(ULONG_PTR)hwnd, g_mainThreadId);
 
     /* Install UEF now that game init is complete.
        This captures the game's filter for chaining on non-AV exceptions. */
     g_prevFilter = SetUnhandledExceptionFilter(UnhandledCrashHandler);
-    LogEvent("Crash recovery filter installed");
+    LogWithTimeStamp("Crash recovery filter installed");
 
     // /* For signature copying - dump the unprotected game exe to file so the data is not encrypted */
     // DumpDecryptedExe();
@@ -1258,7 +1274,7 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     #define HANG_GRACE_PERIOD_MS 120000     /* ignore hangs for first 2 min (game loads in a hang) */
 
     DWORD watchdogStartTime = GetTickCount();
-    LogEvent("Watchdog: hang detection grace period active (%d seconds)",
+    LogWithTimeStamp("Watchdog: hang detection grace period active (%d seconds)",
              HANG_GRACE_PERIOD_MS / 1000);
 
     while (!g_watchdogShutdown) {
@@ -1268,7 +1284,7 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
         /* Re-find the window in case it was recreated */
         hwnd = FindMainThreadWindow();
         if (!hwnd) {
-            LogEvent("Watchdog: game window gone, stopping");
+            LogWithTimeStamp("Watchdog: game window gone, stopping");
             break;
         }
 
@@ -1278,7 +1294,7 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
         if (ok != 0) {
             /* Genuine response from the message loop */
             if (hangDumped) {
-                LogEvent("Watchdog: main thread recovered");
+                LogWithTimeStamp("Watchdog: main thread recovered");
                 hangDumped = FALSE;
             }
         } else {
@@ -1293,7 +1309,7 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
                 /* First detection of a new hang episode */
                 hangStartTime = now;
                 hangTickCount = 0;
-                LogEvent("HANG DETECTED: main thread not responding");
+                LogWithTimeStamp("HANG DETECTED: main thread not responding");
                 InterlockedExchange(&g_hangDetected, 1);
                 ShowBalloon("WC3 Hang Detected!", "Main thread is not responding. See CrashProtector logs.");
 
@@ -1308,7 +1324,7 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
                 LogMainThreadLocation();
             } else if (hangTickCount > 0) {
                 /* Past 1 minute — log once that we're going quiet */
-                LogEvent("Watchdog: still hung after %lus, stopping periodic samples",
+                LogWithTimeStamp("Watchdog: still hung after %lus, stopping periodic samples",
                          (now - hangStartTime) / 1000);
                 hangTickCount = -1; /* sentinel: already logged the quiet message */
             }
@@ -1353,20 +1369,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         g_logThread = CreateThread(NULL, 0, LogWriterThread, NULL, 0, &g_logWriterThreadId);
         InitSymbols();
         LoadSymbolsTxt();
-        LogEvent("=== CrashProtector loaded (PID %lu, symbols=%s) ===",
+        LogWithTimeStamp("=== CrashProtector loaded (PID %lu, symbols=%s) ===",
                  GetCurrentProcessId(), g_hasSymbols ? "YES" : "NO");
 
         /* UEF is installed from the watchdog thread after game init,
            so we install after the game's own filter */
 
-        LogEvent("Ready - monitoring for invalid pointer access violations");
+        LogWithTimeStamp("Ready - monitoring for invalid pointer access violations");
 
         /* Start the hang-detection watchdog */
         g_watchdogThread = CreateThread(NULL, 0, WatchdogThread, NULL, 0, &g_watchdogThreadId);
         if (g_watchdogThread)
-            LogEvent("Watchdog thread started");
+            LogWithTimeStamp("Watchdog thread started");
     } else if (reason == DLL_PROCESS_DETACH) {
-        LogEvent("=== CrashProtector unloading. Total crashes reported: %ld ===", g_crashesSaved);
+        LogWithTimeStamp("=== CrashProtector unloading. Total crashes reported: %ld ===", g_crashesSaved);
 
         /* Shut down the watchdog thread */
         InterlockedExchange(&g_watchdogShutdown, 1);
