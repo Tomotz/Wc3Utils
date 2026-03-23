@@ -1255,6 +1255,11 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     int hangTickCount = 0;
     #define HANG_DUMP_COOLDOWN_MS 60000
     #define HANG_MONITOR_DURATION_MS 60000  /* sample main thread for 1 min then go quiet */
+    #define HANG_GRACE_PERIOD_MS 120000     /* ignore hangs for first 2 min (game loads in a hang) */
+
+    DWORD watchdogStartTime = GetTickCount();
+    LogEvent("Watchdog: hang detection grace period active (%d seconds)",
+             HANG_GRACE_PERIOD_MS / 1000);
 
     while (!g_watchdogShutdown) {
         Sleep(WATCHDOG_INTERVAL_MS);
@@ -1279,6 +1284,10 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
         } else {
             /* SendMessageTimeout failed — treat any failure as hung */
             DWORD now = GetTickCount();
+
+            /* Skip hang detection during the startup grace period */
+            if ((now - watchdogStartTime) < HANG_GRACE_PERIOD_MS)
+                continue;
 
             if (!hangDumped) {
                 /* First detection of a new hang episode */
