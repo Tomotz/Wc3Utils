@@ -136,6 +136,20 @@ static HANDLE g_logFileArchive = INVALID_HANDLE_VALUE;
 static char g_archivePath[MAX_PATH];
 static volatile LONG g_crashesSaved = 0;
 static volatile LONG g_hangDetected = 0;
+
+/* Crash dedup: suppress verbose logging for repeated crash locations */
+#define CRASH_DEDUP_SIZE 32
+#define CRASH_VERBOSE_LIMIT 100
+#define CRASH_DEDUP_REPORT_INTERVAL 100
+
+typedef struct {
+    DWORD64 rip;
+    LONG firstCrashNum;
+} CrashDedupEntry;
+
+static CrashDedupEntry g_crashDedup[CRASH_DEDUP_SIZE];
+static LONG g_crashDedupCount = 0;
+static volatile LONG g_crashDedupSkipped = 0;
 static char g_logDir[MAX_PATH];
 
 /* Write a debug trace directly to the log file (synchronous, for init diagnostics) */
@@ -856,7 +870,7 @@ static DWORD64* GetRegFromContext(CONTEXT* ctx, BYTE regIdx) {
 
 /* Resolve the module containing `rip` and log it.
    Returns TRUE if the address belongs to a known module. */
-static BOOL LogRipModule(DWORD64 rip) {
+static BOOL LogRipModule(DWORD64 rip, BOOL isDuplicate) {
     HMODULE hMod = NULL;
     char modName[MAX_PATH] = "???";
     DWORD64 modOffset = 0;
@@ -869,11 +883,29 @@ static BOOL LogRipModule(DWORD64 rip) {
     }
     char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
     const char* symName = ResolveSymbol(GetCurrentProcess(), rip, symBuf, sizeof(symBuf));
-    LogLine(" Module: %s +0x%llX (%s)", modName, (unsigned long long)modOffset, symName);
+    if (!isDuplicate) {
+        LogLine(" Module: %s +0x%llX (%s)", modName, (unsigned long long)modOffset, symName);
+    }
     return hMod != NULL;
 }
 
 static LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = NULL;
+
+/* Returns the first crash # if this RIP was seen before, 0 if new.
+   Adds new entries to the table (up to CRASH_DEDUP_SIZE). */
+static LONG CrashDedupLookup(DWORD64 rip, LONG crashNum) {
+    for (LONG i = 0; i < g_crashDedupCount; i++) {
+        if (g_crashDedup[i].rip == rip)
+            return g_crashDedup[i].firstCrashNum;
+    }
+    /* New location — register it */
+    if (g_crashDedupCount < CRASH_DEDUP_SIZE) {
+        g_crashDedup[g_crashDedupCount].rip = rip;
+        g_crashDedup[g_crashDedupCount].firstCrashNum = crashNum;
+        g_crashDedupCount++;
+    }
+    return 0;
+}
 
 /* Only reached for access violations that
    no SEH handler caught (i.e., real crashes, not intentional AVs).
@@ -883,7 +915,7 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
         LogWithTimeStamp("UNHANDLED_EXCEPTION: code=0x%08lX RIP=0x%016llX (not an AV, cannot fix)",
                  (unsigned long)ep->ExceptionRecord->ExceptionCode,
                  (unsigned long long)ep->ContextRecord->Rip);
-        LogRipModule(ep->ContextRecord->Rip);
+        LogRipModule(ep->ContextRecord->Rip, FALSE);
         LogRegsAndStackTrace(ep->ContextRecord, GetCurrentThread());
         return g_prevFilter ? g_prevFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
     }
@@ -895,25 +927,46 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
 
     LONG count = InterlockedIncrement(&g_crashesSaved);
 
-    LogWithTimeStamp("ACCESS_VIOLATION #%ld: %s addr=0x%016llX RIP=0x%016llX",
-             count, accessName, (unsigned long long)addr, (unsigned long long)ctx->Rip);
+    /* Dedup: check if we've seen this RIP before */
+    LONG prevCrashNum = CrashDedupLookup(ctx->Rip, count);
+    BOOL isDuplicate = (prevCrashNum != 0);
 
+    if (isDuplicate) {
+        if (count <= CRASH_VERBOSE_LIMIT) {
+            LogWithTimeStamp("ACCESS_VIOLATION #%ld: %s addr=0x%016llX RIP=0x%016llX (same location as crash #%ld)",
+                     count, accessName, (unsigned long long)addr, (unsigned long long)ctx->Rip, prevCrashNum);
+        } else {
+            LONG skipped = InterlockedIncrement(&g_crashDedupSkipped);
+            if (skipped == 1)
+                LogWithTimeStamp("Crash dedup: future duplicate crashes will be silently suppressed (summary every %d)",
+                         CRASH_DEDUP_REPORT_INTERVAL);
+            if ((skipped % CRASH_DEDUP_REPORT_INTERVAL) == 0)
+                LogWithTimeStamp("Crash dedup: %ld duplicate crashes suppressed so far", skipped);
+        }
+    } else {
+        LogWithTimeStamp("ACCESS_VIOLATION #%ld: %s addr=0x%016llX RIP=0x%016llX",
+                 count, accessName, (unsigned long long)addr, (unsigned long long)ctx->Rip);
+    }
+
+    /* Recovery analysis (always runs, logging gated on !isDuplicate) */
     BOOL bailEarly = FALSE;
     hde64s hs;
     unsigned int instrLen = 0;
     DWORD64 retAddr = 0;
 
-    /* Recovery */
     if (accessType == 8) {
         /* EXECUTE: simulate ret if return address is inside a known module */
         if (!SafeRead(GetCurrentProcess(), ctx->Rsp, &retAddr, sizeof(retAddr)) || retAddr == 0) {
-            LogLine("  Recovery: no valid return address on stack, cannot recover");
+            if (!isDuplicate) {
+                LogLine("  Recovery: no valid return address on stack, cannot recover");
+            }
             bailEarly = TRUE;
-        } else if (!LogRipModule(retAddr)) {
-            LogLine("  Recovery: return address 0x%016llX not inside any module, cannot recover",
-                    (unsigned long long)retAddr);
+        } else if (!LogRipModule(retAddr, isDuplicate)) {
+            if (!isDuplicate) {
+                LogLine("  Recovery: return address 0x%016llX not inside any module, cannot recover", (unsigned long long)retAddr);
+            }
             bailEarly = TRUE;
-        } else {
+        } else if (!isDuplicate) {
             LogLine("  Recovery: simulating ret to 0x%016llX", (unsigned long long)retAddr);
         }
     } else {
@@ -921,13 +974,19 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
         instrLen = hde64_disasm((BYTE*)ctx->Rip, &hs);
         if (instrLen == 0 || (hs.flags & F_ERROR))
         {
-            LogLine("  Failed to decode instruction at RIP, cannot analyze or recover");
+            if (!isDuplicate) {
+                LogLine("  Failed to decode instruction at RIP, cannot analyze or recover");
+            }
             bailEarly = TRUE;
         }
 
-        LogRipModule(ctx->Rip);
+        if (!isDuplicate) {
+            LogRipModule(ctx->Rip, FALSE);
+        }
     }
-    LogRegsAndStackTrace(ctx, GetCurrentThread());
+    if (!isDuplicate) {
+        LogRegsAndStackTrace(ctx, GetCurrentThread());
+    }
 
     if (bailEarly) {
         return g_prevFilter ? g_prevFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
