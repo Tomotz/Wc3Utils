@@ -31,6 +31,80 @@ function CrashingFun()
     print("Crashing end")
 end
 
+function Sound2()
+    local s = CreateSound("Sound\\Interface\\Warning\\Human\\KnightInventoryFull1.flac", false, false, false, 0xA, 0xA, "DefaultEAXON")
+    SetSoundVolume(s, 127)
+    SetSoundPitch(s, 0.6)
+    StartSound(s)
+    for i = 1, 1600 do
+        KillSoundWhenDone(s)
+    end
+end
+
+  function StressSoundTest(useAttach, useKillWhenDone, count, interval)
+      local i = 0
+      local u = CreateUnit(Player(0), FourCC("hfoo"), 0, 0, 0)
+      local t = CreateTimer()
+      TimerStart(t, interval, true, function()
+          i = i + 1
+          if i >= count then
+              DestroyTimer(t)
+              print("StressSoundTest done: " .. i .. " sounds created")
+              return
+          end
+          local s = CreateSound("Sound\\Interface\\Warning\\Human\\KnightInventoryFull1.flac", false, true, false, 0xA, 0xA, "")
+          SetSoundPitch(s, GetRandomReal(0.8, 1))
+          SetSoundVolume(s, 0x7F)
+          SetSoundDistances(s, 600, 0x2710)
+          SetSoundDistanceCutoff(s, 0xBB8)
+          if useAttach then
+              AttachSoundToUnit(s, u)
+          else
+              SetSoundPosition(s, GetUnitX(u), GetUnitY(u), 0)
+          end
+          if i % (count / 10) == 0 then
+                KillUnit(u)
+          end
+          StartSound(s)
+          if i % (count / 10) == 5 then
+                KillUnit(u)
+          end
+          if useKillWhenDone then
+              KillSoundWhenDone(s)
+          end
+      end)
+  end
+
+function MultiSound()
+    StressSoundTest(true, true, 2000, 0.01)
+    StressSoundTest(false, true, 2000, 0.01)
+    StressSoundTest(true, false, 2000, 0.01)
+
+    s = {}
+    u = {}
+    for i = 1, 1600 do
+        s[i] = CreateSound("Sound\\Interface\\Warning\\Human\\KnightInventoryFull1.flac", false, false, false, 0xA, 0xA, "DefaultEAXON")
+        a = CreateSound("sdafdfasfdas.flac", false, false, false, 0xA, 0xA, "DefaultEAXON")
+        u[i] = CreateUnit(Player(0), FourCC("hfoo"), 0, 0, 0)
+        SetSoundVolume(s[i], 127)
+        SetSoundPitch(s[i], 0.6)
+        AttachSoundToUnit(s[i], u[i])
+    end
+    for i = 1, 1600 do
+        StartSound(s[i])
+
+    end
+    for i = 1, 1600 do
+        KillUnit(u[i])
+    end
+    for i = 1, 1600 do
+        if s[i] == nil then
+            print("nil!!!")
+        end
+        KillSoundWhenDone(s[i])
+    end
+end
+
 function CrashTest()
     local a = CreateUnit(Player(0), FourCC("hfoo"), 0,0,0)
     SetUnitX(a, 10000)
