@@ -1,4 +1,4 @@
-# WC3 CrashProtector v1.1.1
+# WC3 CrashProtector v1.1.2
 
 A DLL proxy that prevents Warcraft III Reforged from crashing due to invalid pointer access violations, and detects hangs.
 

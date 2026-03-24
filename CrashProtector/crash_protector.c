@@ -275,7 +275,7 @@ static void LogLine(const char* fmt, ...) {
     va_end(args);
 }
 
-void ShowBalloon(const char* title, const char* message)
+static void ShowBalloon(const char* title, const char* message)
 {
     NOTIFYICONDATAA nid = {0};
     nid.cbSize = sizeof(NOTIFYICONDATAA);
@@ -291,6 +291,12 @@ void ShowBalloon(const char* title, const char* message)
     Shell_NotifyIconA(NIM_ADD, &nid);
     Shell_NotifyIconA(NIM_MODIFY, &nid);
 }
+
+/* Pending balloon — crash handler sets these, watchdog thread shows them.
+   Shell_NotifyIconA uses COM/IPC and is NOT safe to call from an exception filter. */
+static char g_pendingBalloonTitle[128] = "";
+static char g_pendingBalloonMsg[256] = "";
+static volatile LONG g_pendingBalloon = 0;
 
 /* ------------------------------------------------------------------ */
 /*  Parameter enumeration via SymSetContext + SymEnumSymbols            */
@@ -787,39 +793,57 @@ static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
 
     LogLine("  --- Stack Trace (Newest first) ---");
 
-    EnterCriticalSection(&g_dbgHelpLock);
+    /* TryEnter to avoid deadlock if the watchdog thread holds the lock */
+    if (!TryEnterCriticalSection(&g_dbgHelpLock)) {
+        LogLine("  (dbghelp lock held by another thread, skipping stack trace)");
+        return;
+    }
 
-    for (int i = 0; i < 64; i++) {
-        if (!g_StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProc, hThread, &frame,
-                           &ctxCopy, NULL, g_SymFunctionTableAccess64,
-                           g_SymGetModuleBase64, NULL))
-            break;
+    int frameCount = 0;
 
-        if (frame.AddrPC.Offset == 0) break;
+    /* Guard against nested exceptions from StackWalk64/dbghelp traversing
+       bad unwind tables — a nested AV inside the UEF kills the process. */
+    __try {
+        for (int i = 0; i < 64; i++) {
+            if (!g_StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProc, hThread, &frame,
+                               &ctxCopy, NULL, g_SymFunctionTableAccess64,
+                               g_SymGetModuleBase64, NULL))
+                break;
 
-        DWORD64 pc = frame.AddrPC.Offset;
+            if (frame.AddrPC.Offset == 0) break;
 
-        /* Resolve symbol name (uses PDB then txt fallback) */
-        char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
-        const char* funcName = ResolveSymbolInner(hProc, pc, symBuf, sizeof(symBuf));
+            DWORD64 pc = frame.AddrPC.Offset;
 
-        /* Collect function parameters */
-        char paramsBuf[400] = "";
-        CollectFrameParams(hProc, &ctxCopy, &frame, paramsBuf, sizeof(paramsBuf));
+            /* Resolve symbol name (uses PDB then txt fallback) */
+            char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+            const char* funcName = ResolveSymbolInner(hProc, pc, symBuf, sizeof(symBuf));
 
-        /* Resolve source file + line, output in gdb format */
-        IMAGEHLP_LINE64 line;
-        line.SizeOfStruct = sizeof(line);
-        DWORD lineDisp = 0;
-        if (g_SymGetLineFromAddr64 && g_SymGetLineFromAddr64(hProc, pc, &lineDisp, &line))
-            LogLine("  #0x%x  0x%llx in %s (%s) at %s:%lu", i, (unsigned long long)pc,
-                     funcName, paramsBuf, line.FileName, line.LineNumber);
-        else
-            LogLine("  #0x%x  0x%llx in %s (%s)", i, (unsigned long long)pc,
-                     funcName, paramsBuf);
+            /* Collect function parameters */
+            char paramsBuf[400] = "";
+            CollectFrameParams(hProc, &ctxCopy, &frame, paramsBuf, sizeof(paramsBuf));
+
+            /* Resolve source file + line, output in gdb format */
+            IMAGEHLP_LINE64 line;
+            line.SizeOfStruct = sizeof(line);
+            DWORD lineDisp = 0;
+            if (g_SymGetLineFromAddr64 && g_SymGetLineFromAddr64(hProc, pc, &lineDisp, &line))
+                LogLine("  #0x%x  0x%llx in %s (%s) at %s:%lu", i, (unsigned long long)pc,
+                         funcName, paramsBuf, line.FileName, line.LineNumber);
+            else
+                LogLine("  #0x%x  0x%llx in %s (%s)", i, (unsigned long long)pc,
+                         funcName, paramsBuf);
+            frameCount++;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LogLine("  (exception 0x%08lX during stack walk, aborting trace)",
+                 (unsigned long)GetExceptionCode());
     }
 
     LeaveCriticalSection(&g_dbgHelpLock);
+
+    if (frameCount == 0) {
+        LogLine("StackWalk64 produced no frames");
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1010,14 +1034,14 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
         ctx->Rip += instrLen;
     }
 
-    /* Show a window popup message on the 1st event, and on the 20th */
+    /* Queue a balloon for the watchdog thread to show (not safe to call Shell_NotifyIconA here) */
     if (count == 1 || count == 20) {
-        char msg[300];
-        sprintf_s(msg, sizeof(msg),
+        sprintf_s(g_pendingBalloonMsg, sizeof(g_pendingBalloonMsg),
                   "CrashProtector: Saved from crashing.\n"
                   "See %s for details.",
                   g_logDir);
-        ShowBalloon("WC3 crash protector!", msg);
+        strcpy_s(g_pendingBalloonTitle, sizeof(g_pendingBalloonTitle), "WC3 crash protector!");
+        InterlockedExchange(&g_pendingBalloon, 1);
     }
 
     return EXCEPTION_CONTINUE_EXECUTION;
@@ -1339,6 +1363,10 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     while (!g_watchdogShutdown) {
         Sleep(WATCHDOG_INTERVAL_MS);
         if (g_watchdogShutdown) break;
+
+        /* Show any balloon queued by the crash handler */
+        if (InterlockedCompareExchange(&g_pendingBalloon, 0, 1) == 1)
+            ShowBalloon(g_pendingBalloonTitle, g_pendingBalloonMsg);
 
         /* Re-find the window in case it was recreated */
         hwnd = FindMainThreadWindow();
