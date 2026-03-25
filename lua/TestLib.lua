@@ -469,17 +469,22 @@ function TestBreakpoints()
     Breakpoint("dynamic_test", {{"status", "testing"}})
 end
 
+function RunAllTests()
+    test_AddEscaping()
+    test_RemoveEscaping()
+    test_roundtrip()
+    LogWrite("escaping validation done")
+    test_dumpLoad()
+    LogWrite("test_dumpLoad validation done")
+    testFileIO()
+    ExecuteFunc(test_sync)
+    ExecuteFunc(test_saveLoad)
+end
+
+
 OnInit.final(function()
     -- Run tests
-    -- test_AddEscaping()
-    -- test_RemoveEscaping()
-    -- test_roundtrip()
-    -- LogWrite("escaping validation done")
-    -- test_dumpLoad()
-    -- LogWrite("test_dumpLoad validation done")
-    -- testFileIO()
-    -- ExecuteFunc(test_sync)
-    -- ExecuteFunc(test_saveLoad)
+    -- RunAllTests()
 end)
 
 end
