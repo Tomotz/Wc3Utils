@@ -8,9 +8,10 @@ import time
 import signal
 import sys
 import threading
-from queue import Queue, Empty
+from queue import Queue
 from collections import defaultdict
 from typing import Optional, Dict, List, Tuple
+from lupa import LuaRuntime as _LuaRuntime
 
 # Optional watchdog import for file watching functionality
 try:
@@ -46,6 +47,47 @@ def set_files_root(path: str) -> None:
 REGEX_PATTERN = rb'call Preload\( "\]\]i\(\[\[(.*?)\]\]\)--\[\[" \)'
 # find any pattern starting with `call Preload( "` and ending with `" )` and concatenate the innter strings
 READ_REGEX_PATTERN = rb'call Preload\( "(.*?)" \)'
+
+# Characters unsupported by FileIO.Load - must match FileIO_unsupportedLoadChars in FileIO.lua
+# null terminator, line feed, carriage return, backslash, closing square bracket
+_UNSUPPORTED_LOAD_CHARS = [0, 10, 13, 92, 93]
+
+# Max bytes per chunk in a loadable preload file (256 - len(']]i([[') - len(']])--[['))
+_MAX_TEXT_LOAD = 243
+
+
+def _init_lua_string_escape():
+    lua = _LuaRuntime(unpack_returned_tuples=True, encoding='latin-1')
+    # Stub Debug used by StringEscape.lua
+    lua.execute("""
+        Debug = setmetatable({}, {
+            __index = function() return function() end end
+        })
+        Debug.assert = function(cond, msg) if not cond then error(msg) end end
+    """)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    string_escape_path = os.path.join(script_dir, '..', 'lua', 'MyLibs', 'StringEscape.lua')
+    with open(string_escape_path, 'r') as f:
+        lua.execute(f.read())
+    return lua
+
+_lua = _init_lua_string_escape()
+_lua_add_escaping = _lua.eval('AddEscaping')
+_lua_remove_escaping = _lua.eval('RemoveEscaping')
+_lua_unsupported_load_chars = _lua.table_from(_UNSUPPORTED_LOAD_CHARS)
+
+def add_escaping(data: bytes) -> bytes:
+    """Calls AddEscaping from StringEscape.lua via lupa."""
+    # latin-1 maps bytes 0-255 to codepoints 0-255 one-to-one
+    result = _lua_add_escaping(data.decode('latin-1'), _lua_unsupported_load_chars)
+    return result.encode('latin-1')
+
+def remove_escaping(data: bytes) -> bytes:
+    """Calls RemoveEscaping from StringEscape.lua via lupa."""
+    result = _lua_remove_escaping(data.decode('latin-1'), _lua_unsupported_load_chars)
+    if result is None:
+        return data
+    return result.encode('latin-1')
 
 FILE_PREFIX = """function PreloadFiles takes nothing returns nothing
 
@@ -230,11 +272,11 @@ file_watcher = FileWatcher()
 
 def load_lua_directory(path: str, build_file_map: bool = False) -> Dict[str, str]:
     """Load all Lua files from a directory.
-    
+
     Args:
         path: Directory path to scan for Lua files
         build_file_map: If True, also populate the global project_file_map
-        
+
     Returns:
         Dict mapping full file paths to file contents
     """
@@ -304,7 +346,7 @@ def inject_into_function(content: str, start: int, end: int, inject_str: str, af
 
 def modify_function(lua_files: dict[str,str], func_name: Optional[str] = None, target_file: str='', target_line: Optional[int]=None, inject_str: str='', after_line: Optional[int]=None) -> Tuple[str, str]:
     """Modify a function by injecting code.
-    
+
     Args:
         lua_files: Dict mapping file paths to file contents
         func_name: Name of function to find (optional if target_line is provided)
@@ -312,7 +354,7 @@ def modify_function(lua_files: dict[str,str], func_name: Optional[str] = None, t
         target_line: Line number to find function containing (optional)
         inject_str: Code to inject
         after_line: Line number within function to inject after (optional, defaults to after header)
-        
+
     Returns:
         Tuple of (modified_function_body, target_file_path)
     """
@@ -333,58 +375,58 @@ def modify_function(lua_files: dict[str,str], func_name: Optional[str] = None, t
         raise ValueError("Could not locate function boundaries")
 
     start, end, _ = match
-    
+
     # Calculate relative line if target_line is provided and after_line is not
     if target_line is not None and after_line is None:
         lines_before_func = content[:start].count('\n')
         after_line = target_line - lines_before_func - 1
-    
+
     new_content = inject_into_function(content, start, end, inject_str, after_line=after_line)
-    
+
     # Extract the modified function body
     new_match = find_lua_function(new_content, func_name=func_name, line_number=target_line)
     if not new_match:
         raise ValueError("Could not re-locate function after injection")
-    
+
     _, _, new_func_body = new_match
     return new_func_body, target_file
 
 
 def resolve_filepath(filepath: str) -> Optional[str]:
     """Resolve a filepath using the project file map.
-    
+
     If filepath is absolute and exists, returns it directly.
     If filepath is relative, searches the project_file_map for matches.
-    
+
     Args:
         filepath: File path (absolute or relative)
-        
+
     Returns:
         Resolved absolute path, or None if not found or ambiguous
     """
     global project_path, project_file_map
-    
+
     # If absolute path, just check if it exists
     if os.path.isabs(filepath):
         if os.path.exists(filepath):
             return filepath
         print(f"Error: File does not exist: {filepath}")
         return None
-    
+
     # If no project path set, we can't resolve relative paths
     if project_path is None:
         print("Error: No project path set. Use 'project <path>' to set the project directory first.")
         return None
-    
+
     # Get the basename to search in the file map
     basename = os.path.basename(filepath)
-    
+
     if basename not in project_file_map:
         print(f"Error: File '{basename}' not found in project")
         return None
-    
+
     matches = project_file_map[basename]
-    
+
     if len(matches) == 1:
         # Only one match - check if the relative path matches
         full_path = matches[0]
@@ -393,13 +435,13 @@ def resolve_filepath(filepath: str) -> Optional[str]:
             return full_path
         # If basename matches but path doesn't, still return it (user just used basename)
         return full_path
-    
+
     # Multiple matches - try to find one that matches the full relative path
     matching_paths = []
     for full_path in matches:
         if full_path.endswith(filepath):
             matching_paths.append(full_path)
-    
+
     if len(matching_paths) == 1:
         return matching_paths[0]
     elif len(matching_paths) == 0:
@@ -431,11 +473,11 @@ def load_file(filename: str) -> Optional[bytes]:
     # First try the i([[ ... ]])--[[ pattern used by create_file/FileIO
     matches = re.findall(REGEX_PATTERN, data, flags=re.DOTALL)
     if matches:
-        return b''.join(matches)
+        return remove_escaping(b''.join(matches))
     # Fallback to simpler pattern for legacy/simple format
     matches = re.findall(READ_REGEX_PATTERN, data, flags=re.DOTALL)
     if matches:
-        return b''.join(matches)
+        return remove_escaping(b''.join(matches))
     return b''
 
 def create_file(filename: str, content) -> None:
@@ -451,14 +493,18 @@ def create_file(filename: str, content) -> None:
     else:
         content_bytes = content
 
+    # Apply escaping to match FileIO.Save behavior - replaces characters that break
+    # the [[ ]] long string format (newlines, ], \, null, carriage return)
+    content_bytes = add_escaping(content_bytes)
+
     # Build the file content as bytes
     data = FILE_PREFIX.encode('utf-8')
     line_prefix_bytes = LINE_PREFIX.encode('utf-8')
     line_postfix_bytes = LINE_POSTFIX.encode('utf-8')
 
-    # Split content into 255 byte chunks
-    for i in range(0, len(content_bytes), 255):
-        chunk = content_bytes[i : i+255]
+    # Split content into _MAX_TEXT_LOAD (243) byte chunks to match FileIO's limit
+    for i in range(0, len(content_bytes), _MAX_TEXT_LOAD):
+        chunk = content_bytes[i : i+_MAX_TEXT_LOAD]
         data += line_prefix_bytes + chunk + line_postfix_bytes
     data += FILE_POSTFIX.encode('utf-8')
     with open(filename, 'wb') as file:
@@ -1047,21 +1093,21 @@ end'''
         except ValueError:
             print(f"Error: Invalid line number '{parts[1]}'")
             return True
-        
+
         # Resolve filepath using project file map
         resolved_path = resolve_filepath(filepath)
         if resolved_path is None:
             return True
-        
+
         # Read the file and create a single-file dict for modify_function
         with open(resolved_path, 'r', encoding='utf-8') as f:
             content = f.read()
         lua_files = {resolved_path: content}
-        
+
         # Create breakpoint ID
         basename = os.path.basename(resolved_path)
         bp_id = f"line:{basename}:{line_num}"
-        
+
         # Use modify_function to inject the breakpoint
         inject_str = f'Breakpoint("{bp_id}")'
         try:
@@ -1069,7 +1115,7 @@ end'''
         except ValueError as e:
             print(f"Error: {e}")
             return True
-        
+
         # Send the modified function to the game
         lua_cmd = wrap_with_oninit_immediate(new_func_body)
         send_data_to_game(lua_cmd)
