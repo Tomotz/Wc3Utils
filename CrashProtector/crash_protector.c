@@ -11,6 +11,8 @@
  */
 
 #define WIN32_LEAN_AND_MEAN
+#define VERSION  "v1.1.2"
+
 #include <stdio.h>
 #include <windows.h>
 
@@ -1337,13 +1339,12 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     }
     if (!hwnd) return 0;
 
-    LogWithTimeStamp("Watchdog: found game window (HWND=0x%llX, tid=%lu)",
-             (unsigned long long)(ULONG_PTR)hwnd, g_mainThreadId);
+    LogWithTimeStamp("CrashProtector %s. Found game window (HWND=0x%llX, tid=%lu)",
+             VERSION, (unsigned long long)(ULONG_PTR)hwnd, g_mainThreadId);
 
     /* Install UEF now that game init is complete.
        This captures the game's filter for chaining on non-AV exceptions. */
     g_prevFilter = SetUnhandledExceptionFilter(UnhandledCrashHandler);
-    LogWithTimeStamp("Crash recovery filter installed");
 
     // /* For signature copying - dump the unprotected game exe to file so the data is not encrypted */
     // DumpDecryptedExe();
