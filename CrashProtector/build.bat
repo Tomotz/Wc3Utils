@@ -90,11 +90,11 @@ if not exist "%WC3DIR%\version.dll" (
 echo       Done.
 
 echo.
-echo === Installation complete! ===
-echo.
 echo Launch WC3 normally through Battle.net.
 echo If a crash is caught, you'll see a popup and a log file:
 echo   %WC3DIR%\crash_protector.log
 echo.
 echo To UNINSTALL: delete version.dll from the WC3 folder.
+echo.
+echo === Installation complete! ===
 

@@ -60,9 +60,11 @@ static CRITICAL_SECTION              g_dbgHelpLock;
 typedef struct {
     DWORD nameOff;      /* offset into g_symStrings */
     BYTE  storage;      /* 0=REG, 1=STACK, 2=UNKNOWN */
-    BYTE  regIdx;       /* CV register ID (low byte) for REG storage */
+    BYTE  pad;
+    WORD  regIdx;       /* CV register ID for REG storage (AMD64 IDs > 255) */
     WORD  stackOff;     /* RSP offset for STACK storage */
-} TxtParam;             /* 8 bytes */
+    WORD  pad2;
+} TxtParam;             /* 12 bytes */
 
 typedef struct {
     DWORD rva;
@@ -663,7 +665,7 @@ static void LoadSymbolsTxt(void) {
                         char* stor = t3 + 1;
                         if (strncmp(stor, "REG:", 4) == 0) {
                             g_txtParams[pi].storage = 0;
-                            g_txtParams[pi].regIdx = (BYTE)TxtRegNameToCV(stor + 4);
+                            g_txtParams[pi].regIdx = (WORD)TxtRegNameToCV(stor + 4);
                         } else if (strncmp(stor, "STACK:", 6) == 0) {
                             g_txtParams[pi].storage = 1;
                             g_txtParams[pi].stackOff = (WORD)atoi(stor + 6);
@@ -807,6 +809,11 @@ static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
        bad unwind tables — a nested AV inside the UEF kills the process. */
     __try {
         for (int i = 0; i < 64; i++) {
+            /* Save context BEFORE StackWalk64 modifies it — after the call,
+               ctxCopy is unwound to the caller's state, so parameter reads
+               from registers (RCX, RDX, R8, R9) would get wrong values. */
+            CONTEXT frameCtx = ctxCopy;
+
             if (!g_StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProc, hThread, &frame,
                                &ctxCopy, NULL, g_SymFunctionTableAccess64,
                                g_SymGetModuleBase64, NULL))
@@ -822,7 +829,7 @@ static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
 
             /* Collect function parameters */
             char paramsBuf[400] = "";
-            CollectFrameParams(hProc, &ctxCopy, &frame, paramsBuf, sizeof(paramsBuf));
+            CollectFrameParams(hProc, &frameCtx, &frame, paramsBuf, sizeof(paramsBuf));
 
             /* Resolve source file + line, output in gdb format */
             IMAGEHLP_LINE64 line;
