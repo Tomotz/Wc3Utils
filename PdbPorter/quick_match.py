@@ -100,6 +100,50 @@ def _undecorate(name):
     return buf.value if result else name
 
 
+def _likely_member_function(name, params):
+    """Heuristic: does this function likely have an implicit 'this' in RCX?
+
+    The PDB sometimes lists 'this' as a parameter (e.g. compiler-generated
+    funclets like dtor$N), but usually omits it.  We detect member functions by:
+      1. Name must contain '::' (scoped).
+      2. PDB must not already provide a 'this' parameter.
+      3. If there are explicit params, none may use RCX (because 'this' occupies it).
+      4. If 0 explicit params, exclude known non-member patterns
+         (dynamic initializers, dynamic atexit destructors).
+    """
+    if '::' not in name:
+        return False
+    if 'dynamic initializer for' in name or 'dynamic atexit destructor' in name:
+        return False
+    if params:
+        # If PDB already provides 'this', or any param uses RCX → skip.
+        if any(pname == 'this' or storage == 'REG:RCX'
+               for pname, _, storage in params):
+            return False
+    return True
+
+
+def _extract_class_name(display_name):
+    """Extract the class/struct name from an undecorated 'Class::Method' name.
+
+    Handles nested templates by tracking angle bracket depth.
+    Returns the class portion, or None if no :: found.
+    """
+    # Find the last '::' that is not inside angle brackets
+    depth = 0
+    i = len(display_name) - 1
+    while i >= 1:
+        ch = display_name[i]
+        if ch == '>':
+            depth += 1
+        elif ch == '<':
+            depth -= 1
+        elif ch == ':' and display_name[i - 1] == ':' and depth == 0:
+            return display_name[:i - 1]
+        i -= 1
+    return None
+
+
 class SYMBOL_INFOW(ctypes.Structure):
     _fields_ = [
         ("SizeOfStruct", ctypes.c_uint32),
@@ -1536,6 +1580,20 @@ def main():
         funcs_with_params = sum(1 for v in params_by_rva.values() if v)
         total_params = sum(len(v) for v in params_by_rva.values())
         print(f"  {funcs_with_params} functions with params, {total_params} params total")
+
+        # Synthesize implicit 'this' parameter for non-static member functions.
+        # The PDB never lists 'this' as a parameter, but x64 calling convention
+        # always passes it in RCX.
+        this_count = 0
+        for name, old_rva, new_rva, size, strategy in results:
+            existing = params_by_rva.get(old_rva, [])
+            if _likely_member_function(name, existing):
+                class_name = _extract_class_name(name) or 'void'
+                this_param = ('this', f'{class_name} *', 'REG:RCX')
+                params_by_rva[old_rva] = [this_param] + existing
+                this_count += 1
+        if this_count:
+            print(f"  Synthesized 'this' for {this_count} member functions")
 
     # --- Write symbol map ---
     if args.output:
