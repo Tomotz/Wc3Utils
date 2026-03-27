@@ -11,7 +11,7 @@
  */
 
 #define WIN32_LEAN_AND_MEAN
-#define VERSION  "v1.1.2"
+#define VERSION  "v1.2.0"
 
 #include <stdio.h>
 #include <windows.h>
@@ -301,6 +301,17 @@ static void ShowBalloon(const char* title, const char* message)
 static char g_pendingBalloonTitle[128] = "";
 static char g_pendingBalloonMsg[256] = "";
 static volatile LONG g_pendingBalloon = 0;
+
+static void QueueCrashBalloon(LONG crashCount) {
+    if (crashCount == 1 || crashCount == 20) {
+        sprintf_s(g_pendingBalloonMsg, sizeof(g_pendingBalloonMsg),
+                  "CrashProtector: Saved from crashing.\n"
+                  "See %s for details.",
+                  g_logDir);
+        strcpy_s(g_pendingBalloonTitle, sizeof(g_pendingBalloonTitle), "WC3 crash protector!");
+        InterlockedExchange(&g_pendingBalloon, 1);
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Parameter enumeration via SymSetContext + SymEnumSymbols            */
@@ -940,17 +951,47 @@ static LONG CrashDedupLookup(DWORD64 rip, LONG crashNum) {
     return 0;
 }
 
+static LONG CurInterval = CRASH_DEDUP_REPORT_INTERVAL;
+
 /* Only reached for access violations that
    no SEH handler caught (i.e., real crashes, not intentional AVs).
    Installed from the watchdog thread after game init is complete. */
 static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
-        LogWithTimeStamp("UNHANDLED_EXCEPTION: code=0x%08lX RIP=0x%016llX (not an AV, cannot fix)",
-                 (unsigned long)ep->ExceptionRecord->ExceptionCode,
-                 (unsigned long long)ep->ContextRecord->Rip);
-        LogRipModule(ep->ContextRecord->Rip, FALSE);
-        LogRegsAndStackTrace(ep->ContextRecord, GetCurrentThread());
-        return g_prevFilter ? g_prevFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
+        CONTEXT* ctx = ep->ContextRecord;
+        LONG count = InterlockedIncrement(&g_crashesSaved);
+        LogWithTimeStamp("UNHANDLED_EXCEPTION #%ld: code=0x%08lX RIP=0x%016llX",
+                 count, (unsigned long)ep->ExceptionRecord->ExceptionCode,
+                 (unsigned long long)ctx->Rip);
+        LogRipModule(ctx->Rip, FALSE);
+        LogRegsAndStackTrace(ctx, GetCurrentThread());
+
+        /* Try to decode and skip the faulting instruction */
+        hde64s hs;
+        unsigned int instrLen = hde64_disasm((BYTE*)ctx->Rip, &hs);
+        if (instrLen > 0 && !(hs.flags & F_ERROR)) {
+            LogLine("  Recovery: skipping %u-byte instruction at RIP", instrLen);
+            ctx->Rip += instrLen;
+            ctx->Rax = 0;
+        } else {
+            /* Can't decode — try simulating ret as last resort */
+            DWORD64 retAddr = 0;
+            if (SafeRead(GetCurrentProcess(), ctx->Rsp, &retAddr, sizeof(retAddr))
+                && retAddr != 0) {
+                LogLine("  Recovery: can't decode instruction, simulating ret to 0x%016llX",
+                         (unsigned long long)retAddr);
+                ctx->Rip = retAddr;
+                ctx->Rsp += 8;
+                ctx->Rax = 0;
+            } else {
+                LogLine("  Recovery: cannot recover from this exception");
+                return g_prevFilter ? g_prevFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
+            }
+        }
+
+        QueueCrashBalloon(count);
+
+        return EXCEPTION_CONTINUE_EXECUTION;
     }
 
     ULONG_PTR accessType = ep->ExceptionRecord->ExceptionInformation[0];
@@ -970,11 +1011,16 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
                      count, accessName, (unsigned long long)addr, (unsigned long long)ctx->Rip, prevCrashNum);
         } else {
             LONG skipped = InterlockedIncrement(&g_crashDedupSkipped);
-            if (skipped == 1)
+            if (skipped == 1) {
                 LogWithTimeStamp("Crash dedup: future duplicate crashes will be silently suppressed (summary every %d)",
-                         CRASH_DEDUP_REPORT_INTERVAL);
-            if ((skipped % CRASH_DEDUP_REPORT_INTERVAL) == 0)
+                         CurInterval);
+            } else if (skipped == CurInterval * 10) {
+                CurInterval *= 10;
+                LogWithTimeStamp("Crash dedup: future duplicate crashes will be silently suppressed (summary every %d). %ld duplicate crashes suppressed so far",
+                         CurInterval, skipped);
+            } else if ((skipped % CurInterval) == 0) {
                 LogWithTimeStamp("Crash dedup: %ld duplicate crashes suppressed so far", skipped);
+            }
         }
     } else {
         LogWithTimeStamp("ACCESS_VIOLATION #%ld: %s addr=0x%016llX RIP=0x%016llX",
@@ -1043,15 +1089,7 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
         ctx->Rip += instrLen;
     }
 
-    /* Queue a balloon for the watchdog thread to show (not safe to call Shell_NotifyIconA here) */
-    if (count == 1 || count == 20) {
-        sprintf_s(g_pendingBalloonMsg, sizeof(g_pendingBalloonMsg),
-                  "CrashProtector: Saved from crashing.\n"
-                  "See %s for details.",
-                  g_logDir);
-        strcpy_s(g_pendingBalloonTitle, sizeof(g_pendingBalloonTitle), "WC3 crash protector!");
-        InterlockedExchange(&g_pendingBalloon, 1);
-    }
+    QueueCrashBalloon(count);
 
     return EXCEPTION_CONTINUE_EXECUTION;
 }

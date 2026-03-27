@@ -11,20 +11,22 @@ There are a few main reasons that players drop undesirably from games:
  - Freezes - A very heavy compute is causing the application to hang. Can be an infinite loop, or just a very very long one that is intensive enough to make the process. When this happens the game window will freeze, and windows will offer to restart it.
 
  In this project we try to avoid crashes and make crashes and freezes more informative (allowing you to classify them, and possibly even understand what caused them).
- This project only handles freezes and access violation crashes (which are the most common crash in the games I played). It will not solve or log any other type of crash.
 
-**Crash protection** — intercepts unhandled access violation exceptions and safely recovers:
-- Detecting when the game tries to read/write/execute invalid memory addresses
-- For reads: returning 0 to the destination register
-- For writes: discarding the write operation (nop)
-- For execute (DEP): simulating a return to the caller
-- Advancing past the faulting instruction to continue execution
+**Crash protection** — intercepts unhandled exceptions and safely recovers:
+- **Access violations** (most common crash type):
+  - For reads: returning 0 to the destination register
+  - For writes: discarding the write operation (nop)
+  - For execute (DEP): simulating a return to the caller
+  - Advancing past the faulting instruction to continue execution
+- **Other exceptions** (division by zero, illegal instruction, etc.):
+  - Decodes and skips the faulting instruction
+  - Falls back to simulating a return if the instruction can't be decoded
 
 **Hang detection** — a watchdog thread monitors the game's main thread and logs diagnostics (all thread stacks) when it stops responding.
 
 **Logging** — all crashes and hangs are logged to `Documents\CrashProtector\crash_protector.log` with register dumps, and module info. If symbols are available, will also generate stack traces and function args. Notification balloons appear on the 1st and 20th saved crash, and when a hang is detected to let the user know.
 
-Only truly unhandled exceptions are caught — the game's own exception handlers (`__try/__except`) run first and are not interfered with.
+Only truly unhandled exceptions are caught — the game's own exception handlers (`__try/__except`) run first and are not interfered with. If recovery is not possible (e.g. can't decode the instruction and no valid return address on the stack), the exception is passed through to the default handler.
 
 Note: this is a very hacky mitigation for crashes. Skipping faulting instructions leaves the program in a potentially inconsistent state, and might lead to later errors, but it is tested and prevents real crashes in practice. It is not expected to cause any issue when no crashes were encountered.
 
