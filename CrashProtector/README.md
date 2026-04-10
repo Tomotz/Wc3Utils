@@ -82,9 +82,10 @@ Additionally, **VCH** (Vectored Continue Handlers, via `AddVectoredContinueHandl
 ### Option 2: Build and Install
 
 1. Open PowerShell
-2. Navigate to this folder
+2. Navigate to WC3Utils folder
 3. Run the build script with your WC3 path (might not be C:\):
    ```
+   cd CrashProtector
    .\build.bat "D:\Program Files (x86)\Warcraft III\_retail_\x86_64"
    ```
 
@@ -173,3 +174,13 @@ This produces `version.dll` which you can manually copy to your WC3 folder.
    ```
    copy symbols.txt "D:\Program Files (x86)\Warcraft III\_retail_\x86_64\"
    ```
+
+## Changelog
+
+### v1.3.0
+- Skip default log file (`crash_protector.log`) and hang detection when loaded by World Editor
+- Support recovery from non-AV exceptions (division by zero, illegal instruction, etc.) — decodes and skips the faulting instruction, or simulates a ret as fallback
+- Crash dedup reporting interval now scales up (10x) as duplicate count grows, reducing log clutter
+
+### v1.2.0
+- Better support for register and argument prints

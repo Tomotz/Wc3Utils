@@ -11,7 +11,7 @@
  */
 
 #define WIN32_LEAN_AND_MEAN
-#define VERSION  "v1.2.0"
+#define VERSION  "v1.3.0"
 
 #include <stdio.h>
 #include <windows.h>
@@ -1400,7 +1400,7 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     int hangTickCount = 0;
     #define HANG_DUMP_COOLDOWN_MS 60000
     #define HANG_MONITOR_DURATION_MS 60000  /* sample main thread for 1 min then go quiet */
-    #define HANG_GRACE_PERIOD_MS 120000     /* ignore hangs for first 2 min (game loads in a hang) */
+    #define HANG_GRACE_PERIOD_MS 90000     /* ignore hangs for first 1.5 min (game loads in a hang) */
 
     DWORD watchdogStartTime = GetTickCount();
     LogWithTimeStamp("Watchdog: hang detection grace period active (%d seconds)",
@@ -1479,6 +1479,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         LoadRealVersion();
         DisableThreadLibraryCalls(hModule);
 
+        /* Detect World Editor — skip default log and hang detection */
+        BOOL isWorldEditor = FALSE;
+        {
+            char exePath[MAX_PATH];
+            GetModuleFileNameA(NULL, exePath, MAX_PATH);
+            const char* exeName = strrchr(exePath, '\\');
+            exeName = exeName ? exeName + 1 : exePath;
+            if (_stricmp(exeName, "World Editor.exe") == 0) {
+                isWorldEditor = TRUE;
+            }
+        }
+
         /* Build log dir and both log paths under Documents\CrashProtector */
         {
             char docsPath[MAX_PATH];
@@ -1489,8 +1501,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
             CreateDirectoryA(g_logDir, NULL); /* ok if already exists */
 
             sprintf_s(logPath, MAX_PATH, "%s\\crash_protector.log", g_logDir);
-            g_logFile = CreateFileA(logPath, GENERIC_WRITE, FILE_SHARE_READ,
-                                    NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (!isWorldEditor) {
+                g_logFile = CreateFileA(logPath, GENERIC_WRITE, FILE_SHARE_READ,
+                                        NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            }
 
             SYSTEMTIME st;
             GetLocalTime(&st);
@@ -1510,10 +1524,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
 
         LogWithTimeStamp("Ready - monitoring for invalid pointer access violations");
 
-        /* Start the hang-detection watchdog */
-        g_watchdogThread = CreateThread(NULL, 0, WatchdogThread, NULL, 0, &g_watchdogThreadId);
-        if (g_watchdogThread)
-            LogWithTimeStamp("Watchdog thread started");
+        /* Start the hang-detection watchdog (skip for World Editor) */
+        if (!isWorldEditor) {
+            g_watchdogThread = CreateThread(NULL, 0, WatchdogThread, NULL, 0, &g_watchdogThreadId);
+            if (g_watchdogThread)
+                LogWithTimeStamp("Watchdog thread started");
+        }
     } else if (reason == DLL_PROCESS_DETACH) {
         LogWithTimeStamp("=== CrashProtector unloading. Total crashes reported: %ld ===", g_crashesSaved);
 
