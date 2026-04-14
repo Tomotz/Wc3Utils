@@ -177,6 +177,7 @@ static volatile LONG g_logTail = 0;  /* next slot to read  */
 static HANDLE g_logEvent = NULL;     /* signals writer thread */
 static HANDLE g_logThread = NULL;
 static volatile LONG g_logShutdown = 0;
+static volatile LONG g_flushing = 0;  /* prevents concurrent FlushLogSync */
 
 /* Open the archive log and copy the current crash_protector.log contents into it */
 static void OpenArchiveLog(void) {
@@ -209,29 +210,41 @@ static void WriteToLog(HANDLE hFile, const char* entry, DWORD len) {
     WriteFile(hFile, "\r\n", 2, &written, NULL);
 }
 
+/* Drain the ring buffer and flush to disk.
+   Called from the writer thread and synchronously from the crash handler.
+   Guarded so only one thread drains at a time — concurrent InterlockedIncrement
+   on g_logTail would overshoot g_logHead and spin the drain loop forever. */
+static void FlushLogSync(void) {
+    /* Spin until we're the sole flusher */
+    while (InterlockedCompareExchange(&g_flushing, 1, 0) != 0)
+        Sleep(1);
+
+    if (g_logFileArchive == INVALID_HANDLE_VALUE && (g_crashesSaved >= 1 || g_hangDetected))
+        OpenArchiveLog();
+
+    while (g_logTail != g_logHead) {
+        LONG slot = g_logTail & (LOG_RING_SIZE - 1);
+        DWORD len = (DWORD)strlen(g_logRing[slot]);
+        if (g_logFile != INVALID_HANDLE_VALUE)
+            WriteToLog(g_logFile, g_logRing[slot], len);
+        if (g_logFileArchive != INVALID_HANDLE_VALUE)
+            WriteToLog(g_logFileArchive, g_logRing[slot], len);
+        InterlockedIncrement(&g_logTail);
+    }
+
+    if (g_logFile != INVALID_HANDLE_VALUE)
+        FlushFileBuffers(g_logFile);
+    if (g_logFileArchive != INVALID_HANDLE_VALUE)
+        FlushFileBuffers(g_logFileArchive);
+
+    InterlockedExchange(&g_flushing, 0);
+}
+
 static DWORD WINAPI LogWriterThread(LPVOID param) {
     (void)param;
     while (!g_logShutdown) {
         WaitForSingleObject(g_logEvent, 500); /* wake on signal or periodic flush */
-
-        /* Create archive log on first crash or hang */
-        if (g_logFileArchive == INVALID_HANDLE_VALUE && (g_crashesSaved >= 1 || g_hangDetected))
-            OpenArchiveLog();
-
-        while (g_logTail != g_logHead) {
-            LONG slot = g_logTail & (LOG_RING_SIZE - 1);
-            DWORD len = (DWORD)strlen(g_logRing[slot]);
-            if (g_logFile != INVALID_HANDLE_VALUE)
-                WriteToLog(g_logFile, g_logRing[slot], len);
-            if (g_logFileArchive != INVALID_HANDLE_VALUE)
-                WriteToLog(g_logFileArchive, g_logRing[slot], len);
-            InterlockedIncrement(&g_logTail);
-        }
-
-        if (g_logFile != INVALID_HANDLE_VALUE)
-            FlushFileBuffers(g_logFile);
-        if (g_logFileArchive != INVALID_HANDLE_VALUE)
-            FlushFileBuffers(g_logFileArchive);
+        FlushLogSync();
     }
 
     return 0;
@@ -985,11 +998,13 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
                 ctx->Rax = 0;
             } else {
                 LogLine("  Recovery: cannot recover from this exception");
+                FlushLogSync();
                 return g_prevFilter ? g_prevFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
             }
         }
 
         QueueCrashBalloon(count);
+        FlushLogSync();
 
         return EXCEPTION_CONTINUE_EXECUTION;
     }
@@ -1068,6 +1083,7 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
     }
 
     if (bailEarly) {
+        FlushLogSync();
         return g_prevFilter ? g_prevFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
     }
 
@@ -1090,6 +1106,7 @@ static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
     }
 
     QueueCrashBalloon(count);
+    FlushLogSync();
 
     return EXCEPTION_CONTINUE_EXECUTION;
 }
