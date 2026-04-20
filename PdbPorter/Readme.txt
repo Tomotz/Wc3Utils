@@ -21,7 +21,7 @@ Prerequisites:
 
 One command does everything:
   cd D:\Tom\scripts\wc3\Wc3Utils\PdbPorter
-  python quick_match.py "Warcraft III.bak.exe" "Warcraft III.exe" -o symbols.txt
+  python quick_match.py "Warcraft III_symboled.exe" "Warcraft III.exe" -o symbols.txt
 
   Then copy the result next to the game exe:
   copy symbols.txt "D:\Program Files (x86)\Warcraft III\_retail_\x86_64\symbols.txt"

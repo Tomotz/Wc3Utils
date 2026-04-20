@@ -235,12 +235,23 @@ def _resolve_type(process, mod_base, type_index, depth=0):
 
 
 def _get_storage(info):
-    """Get parameter storage string from SYMBOL_INFOW."""
+    """Get parameter storage string from SYMBOL_INFOW.
+
+    Formats:
+      REG:<REG>                   - value is in a register
+      STACK:<BASE>+<off>          - value is at [BASE + off]; off may be signed
+                                    (e.g. STACK:RSP+16, STACK:RBP-8, STACK:RDX+224)
+    """
     if info.Flags & SYMFLAG_REGISTER:
         return "REG:" + CV_REG_NAMES.get(info.Register, f"reg{info.Register}")
     if info.Flags & SYMFLAG_REGREL:
         base = CV_REG_NAMES.get(info.Register, f"reg{info.Register}")
-        return f"STACK:{info.Address}"
+        # Address is uint64 but represents a signed offset from the base register.
+        off = info.Address
+        if off >= (1 << 63):
+            off -= (1 << 64)
+        sign = "+" if off >= 0 else "-"
+        return f"STACK:{base}{sign}{abs(off)}"
     return "UNKNOWN"
 
 

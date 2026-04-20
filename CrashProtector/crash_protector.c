@@ -11,7 +11,7 @@
  */
 
 #define WIN32_LEAN_AND_MEAN
-#define VERSION  "v1.3.0"
+#define VERSION  "v1.3.1"
 
 #include <stdio.h>
 #include <windows.h>
@@ -61,9 +61,9 @@ typedef struct {
     DWORD nameOff;      /* offset into g_symStrings */
     BYTE  storage;      /* 0=REG, 1=STACK, 2=UNKNOWN */
     BYTE  pad;
-    WORD  regIdx;       /* CV register ID for REG storage (AMD64 IDs > 255) */
-    WORD  stackOff;     /* RSP offset for STACK storage */
-    WORD  pad2;
+    WORD  regIdx;       /* REG: register holding the value.
+                           STACK: base register the offset is relative to. */
+    INT   stackOff;     /* STACK: signed offset from regIdx */
 } TxtParam;             /* 12 bytes */
 
 typedef struct {
@@ -349,8 +349,11 @@ static void QueueCrashBalloon(LONG crashCount) {
 #define CV_AMD64_R15  343
 
 typedef struct {
-    CONTEXT* ctx;           /* register state for reading values */
+    CONTEXT* ctx;           /* register state for reading values (per-frame) */
     HANDLE   hProc;
+    BOOL     isTopFrame;    /* TRUE only for the crashed frame; for caller frames
+                               volatile registers (RCX/RDX/R8/R9/...) are clobbered
+                               and live reads must be suppressed. */
     int      paramCount;    /* how many params we've collected so far */
     char     buf[1000];      /* accumulated "name=0xval, name=0xval, ..." */
     int      bufPos;
@@ -398,14 +401,32 @@ static BOOL CALLBACK EnumParamsCallback(PSYMBOL_INFO sym, ULONG symSize, PVOID u
     DWORD64 value = 0;
     BOOL    hasValue = FALSE;
 
+    /* For non-top frames the only registers StackWalk64 reliably reconstructs
+       are RSP/RBP (and other non-volatiles restored via unwind codes). Volatile
+       arg registers (RCX/RDX/R8/R9) have been clobbered since this frame made
+       its call, so we must not read them from the live context — doing so
+       would report the crashed frame's values for every caller. Be honest:
+       emit name=? instead. */
     if (sym->Flags & SYMFLAG_REGISTER) {
-        value = CvRegToValue(ep->ctx, sym->Register);
-        hasValue = TRUE;
+        if (ep->isTopFrame) {
+            value = CvRegToValue(ep->ctx, sym->Register);
+            hasValue = TRUE;
+        }
     } else if (sym->Flags & SYMFLAG_REGREL) {
-        DWORD64 base = CvRegToValue(ep->ctx, sym->Register);
-        DWORD64 addr = base + (LONG64)sym->Address;
-        SIZE_T readSize = (sym->Size > 0 && sym->Size <= 8) ? sym->Size : 8;
-        hasValue = SafeRead(ep->hProc, addr, &value, readSize);
+        BOOL baseKnown = FALSE;
+        DWORD64 base = 0;
+        if (ep->isTopFrame) {
+            base = CvRegToValue(ep->ctx, sym->Register);
+            baseKnown = TRUE;
+        } else if (sym->Register == CV_AMD64_RSP || sym->Register == CV_AMD64_RBP) {
+            base = CvRegToValue(ep->ctx, sym->Register);
+            baseKnown = TRUE;
+        }
+        if (baseKnown) {
+            DWORD64 addr = base + (LONG64)sym->Address;
+            SIZE_T readSize = (sym->Size > 0 && sym->Size <= 8) ? sym->Size : 8;
+            hasValue = SafeRead(ep->hProc, addr, &value, readSize);
+        }
     } else if (sym->Flags & SYMFLAG_FRAMEREL) {
         DWORD64 addr = ep->ctx->Rbp + (LONG64)sym->Address;
         SIZE_T readSize = (sym->Size > 0 && sym->Size <= 8) ? sym->Size : 8;
@@ -487,9 +508,11 @@ static const TxtFunc* TxtFindFunc(DWORD rva) {
     return NULL;
 }
 
-/* Collect parameters for a txt-symbol function */
+/* Collect parameters for a txt-symbol function.
+   isTopFrame must be TRUE only for the crashed frame; for caller frames we
+   suppress reads from clobbered volatile registers. */
 static void TxtCollectFrameParams(const TxtFunc* func, CONTEXT* ctx,
-                                   HANDLE hProc, DWORD64 frameRsp,
+                                   HANDLE hProc, BOOL isTopFrame,
                                    char* outBuf, int outBufSize) {
     outBuf[0] = '\0';
     if (func->paramCount == 0) return;
@@ -501,10 +524,18 @@ static void TxtCollectFrameParams(const TxtFunc* func, CONTEXT* ctx,
         DWORD64 value = 0;
         BOOL hasValue = FALSE;
         if (p->storage == 0) { /* REG */
-            value = CvRegToValue(ctx, p->regIdx);
-            hasValue = TRUE;
-        } else if (p->storage == 1) { /* STACK */
-            hasValue = SafeRead(hProc, frameRsp + p->stackOff, &value, 8);
+            if (isTopFrame) {
+                value = CvRegToValue(ctx, p->regIdx);
+                hasValue = TRUE;
+            }
+        } else if (p->storage == 1) { /* STACK: [regIdx + stackOff] */
+            BOOL baseKnown = isTopFrame
+                          || p->regIdx == CV_AMD64_RSP
+                          || p->regIdx == CV_AMD64_RBP;
+            if (baseKnown) {
+                DWORD64 base = CvRegToValue(ctx, p->regIdx);
+                hasValue = SafeRead(hProc, base + (LONG64)(INT)p->stackOff, &value, 8);
+            }
         }
 
         int remaining = outBufSize - pos;
@@ -691,8 +722,24 @@ static void LoadSymbolsTxt(void) {
                             g_txtParams[pi].storage = 0;
                             g_txtParams[pi].regIdx = (WORD)TxtRegNameToCV(stor + 4);
                         } else if (strncmp(stor, "STACK:", 6) == 0) {
+                            /* Two formats:
+                               New:    STACK:<REG>+<off>  or  STACK:<REG>-<off>
+                               Legacy: STACK:<off>                (assume RSP) */
                             g_txtParams[pi].storage = 1;
-                            g_txtParams[pi].stackOff = (WORD)atoi(stor + 6);
+                            const char* s = stor + 6;
+                            const char* sep = s;
+                            while (*sep && *sep != '+' && *sep != '-') sep++;
+                            if (*sep && sep != s) {
+                                char regName[8] = {0};
+                                size_t rlen = (size_t)(sep - s);
+                                if (rlen >= sizeof(regName)) rlen = sizeof(regName) - 1;
+                                memcpy(regName, s, rlen);
+                                g_txtParams[pi].regIdx = (WORD)TxtRegNameToCV(regName);
+                                g_txtParams[pi].stackOff = atoi(sep); /* atoi reads leading sign */
+                            } else {
+                                g_txtParams[pi].regIdx = (WORD)CV_AMD64_RSP;
+                                g_txtParams[pi].stackOff = atoi(s);
+                            }
                         } else {
                             g_txtParams[pi].storage = 2; /* UNKNOWN */
                         }
@@ -723,9 +770,10 @@ static void LoadSymbolsTxt(void) {
     }
 }
 
-/* Collect frame params into outBuf as "name=0xval, name=0xval, ..." */
+/* Collect frame params into outBuf as "name=0xval, name=0xval, ..."
+   isTopFrame must be TRUE only for the crashed frame. */
 static void CollectFrameParams(HANDLE hProc, CONTEXT* ctx, STACKFRAME64* frame,
-                               char* outBuf, int outBufSize) {
+                               BOOL isTopFrame, char* outBuf, int outBufSize) {
     outBuf[0] = '\0';
 
     /* Try PDB params first */
@@ -740,6 +788,7 @@ static void CollectFrameParams(HANDLE hProc, CONTEXT* ctx, STACKFRAME64* frame,
             EnumParamsCtx ep;
             ep.ctx        = ctx;
             ep.hProc      = hProc;
+            ep.isTopFrame = isTopFrame;
             ep.paramCount = 0;
             ep.buf[0]     = '\0';
             ep.bufPos     = 0;
@@ -760,7 +809,7 @@ static void CollectFrameParams(HANDLE hProc, CONTEXT* ctx, STACKFRAME64* frame,
             DWORD rva = (DWORD)(frame->AddrPC.Offset - (DWORD64)hExe);
             const TxtFunc* func = TxtFindFunc(rva);
             if (func && func->paramCount > 0)
-                TxtCollectFrameParams(func, ctx, hProc, frame->AddrStack.Offset,
+                TxtCollectFrameParams(func, ctx, hProc, isTopFrame,
                                       outBuf, outBufSize);
         }
     }
@@ -833,9 +882,11 @@ static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
        bad unwind tables — a nested AV inside the UEF kills the process. */
     __try {
         for (int i = 0; i < 64; i++) {
-            /* Save context BEFORE StackWalk64 modifies it — after the call,
-               ctxCopy is unwound to the caller's state, so parameter reads
-               from registers (RCX, RDX, R8, R9) would get wrong values. */
+            /* Snapshot the per-frame context before StackWalk64 unwinds it.
+               StackWalk64 restores non-volatile registers (RSP/RBP/RBX/RSI/
+               RDI/R12-R15) via unwind codes, so frameCtx's RSP/RBP are valid
+               for this frame. Volatile registers are not restored — only the
+               top frame's volatiles reflect real values. */
             CONTEXT frameCtx = ctxCopy;
 
             if (!g_StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProc, hThread, &frame,
@@ -851,9 +902,13 @@ static void LogRegsAndStackTrace(CONTEXT* ctx, HANDLE hThread) {
             char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
             const char* funcName = ResolveSymbolInner(hProc, pc, symBuf, sizeof(symBuf));
 
-            /* Collect function parameters */
+            /* Collect function parameters. Only the crashed frame has a
+               trustworthy live register context; for caller frames volatile
+               registers have been clobbered and must not be reported as
+               parameter values. */
             char paramsBuf[400] = "";
-            CollectFrameParams(hProc, &frameCtx, &frame, paramsBuf, sizeof(paramsBuf));
+            CollectFrameParams(hProc, &frameCtx, &frame, (i == 0),
+                               paramsBuf, sizeof(paramsBuf));
 
             /* Resolve source file + line, output in gdb format */
             IMAGEHLP_LINE64 line;

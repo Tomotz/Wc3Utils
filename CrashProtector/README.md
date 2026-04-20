@@ -177,6 +177,10 @@ This produces `version.dll` which you can manually copy to your WC3 folder.
 
 ## Changelog
 
+### v1.3.1
+- Remove wrong register argument values from stacktrace - only leave values at top of the stack, and stack relative arguments.
+- Fix stack argument value calculations.
+
 ### v1.3.0
 - Skip default log file (`crash_protector.log`) and hang detection when loaded by World Editor
 - Support recovery from non-AV exceptions (division by zero, illegal instruction, etc.) — decodes and skips the faulting instruction, or simulates a ret as fallback
