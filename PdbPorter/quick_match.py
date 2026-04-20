@@ -37,6 +37,7 @@ SYMFLAG_REGREL        = 0x00000010
 SYMFLAG_PARAMETER     = 0x00000040
 
 # CV_HREG_e register IDs for AMD64
+# other register values can be found here https://fossies.org/linux/llvm-project/llvm/include/llvm/DebugInfo/CodeView/CodeViewRegisters.def
 CV_REG_NAMES = {
     328: 'RAX', 329: 'RBX', 330: 'RCX', 331: 'RDX',
     332: 'RSI', 333: 'RDI', 334: 'RBP', 335: 'RSP',

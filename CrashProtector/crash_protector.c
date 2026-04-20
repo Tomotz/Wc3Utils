@@ -142,7 +142,7 @@ static volatile LONG g_crashesSaved = 0;
 static volatile LONG g_hangDetected = 0;
 
 /* Crash dedup: suppress verbose logging for repeated crash locations */
-#define CRASH_DEDUP_SIZE 32
+#define CRASH_DEDUP_SIZE 100
 #define CRASH_VERBOSE_LIMIT 100
 #define CRASH_DEDUP_REPORT_INTERVAL 100
 
