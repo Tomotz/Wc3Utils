@@ -1,4 +1,4 @@
-PDB Porter v1.0.0
+PDB Porter v1.0.1
 ==========
 
 Ports debug symbols (function names + parameter info) from an old WC3 binary
