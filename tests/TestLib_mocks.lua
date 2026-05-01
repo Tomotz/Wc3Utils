@@ -289,6 +289,12 @@ local currentTriggerData = {
     syncData = nil
 }
 
+function ResetMockState()
+    triggerIdCounter = 0
+    activeTriggers = {}
+    syncEventHandlers = {}
+end
+
 ---@return trigger
 function CreateTrigger()
     triggerIdCounter = triggerIdCounter + 1
