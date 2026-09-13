@@ -3,6 +3,12 @@
 This library contains all the utilities I created for developing wc3 maps that are in a mature enough state to share with others.
 It also contains all the depandencies needed by my libraries, and some tests.
 
+### CrashProtector -
+Windows x64 DLL proxy that attempts recovery from unhandled WC3 crashes and records crash and hang diagnostics. The current signed distribution targets Reforged 3.0.0.24268 and includes matching partial symbols. See [installation and build instructions](CrashProtector/README.md) and [signing and sharing](CrashProtector/LOCAL-SIGNING.md).
+
+### PdbPorter -
+Tools for porting function and parameter symbols from an older executable with a matching PDB to a newer game build. See the [symbol-update workflow](CrashProtector/README.md#updating-symbols-after-a-wc3-patch) used by CrashProtector.
+
 ### DebugDumps -
 Debugging tool for investigating desyncs by logging stacktraces, recently executed functions, active timers, and context-switching function calls. Automatically dumps diagnostic information when a player leaves the game.
 https://www.hiveworkshop.com/threads/debugdumps-desync-debugging.357626/

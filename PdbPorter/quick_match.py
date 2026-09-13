@@ -21,6 +21,7 @@ import sys
 import tempfile
 import bisect
 from collections import defaultdict
+from inspect_snapshot import inspect as inspect_snapshot, range_is_readable
 
 # ---------------------------------------------------------------------------
 # dbghelp PDB parsing
@@ -1165,6 +1166,68 @@ def find_bytes_in(index, needle):
     return results
 
 
+CACHE_FORMAT_VERSION = 2
+
+
+def _matcher_source_hash():
+    with open(__file__, 'rb') as source:
+        return hashlib.sha256(source.read()).digest()
+
+
+def make_cache_key(old_data, new_data, pdb_path, min_size):
+    """Include all matching inputs; same-size replacements must never hit cache."""
+    digest = hashlib.sha256()
+    for value in (str(CACHE_FORMAT_VERSION).encode(), str(min_size).encode(),
+                  hashlib.sha256(old_data).digest(), hashlib.sha256(new_data).digest(),
+                  _matcher_source_hash()):
+        digest.update(len(value).to_bytes(8, 'little'))
+        digest.update(value)
+    pdb_digest = hashlib.sha256()
+    with open(pdb_path, 'rb') as source:
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            pdb_digest.update(block)
+    digest.update(pdb_digest.digest())
+    return digest.hexdigest()
+
+
+class _DataUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        raise pickle.UnpicklingError('cache must contain data only')
+
+
+class MatchCache:
+    def __init__(self, directory, key, enabled=True):
+        self.directory, self.key, self.enabled = directory, key, enabled
+        if enabled:
+            os.makedirs(directory, exist_ok=True)
+
+    def load(self, stage):
+        if not self.enabled:
+            return None
+        path = os.path.join(self.directory, f'{self.key}_{stage}.pkl')
+        try:
+            with open(path, 'rb') as stream:
+                return _DataUnpickler(stream).load()
+        except FileNotFoundError:
+            return None
+        except (OSError, EOFError, pickle.UnpicklingError, ValueError, TypeError):
+            print(f'Ignoring unreadable cache: {path}')
+            return None
+
+    def save(self, stage, data):
+        if not self.enabled:
+            return
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=self.directory, delete=False) as stream:
+                temporary = stream.name
+                pickle.dump(data, stream, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(temporary, os.path.join(self.directory, f'{self.key}_{stage}.pkl'))
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Quick function matcher — byte search")
     parser.add_argument("old_binary", help="Old binary (with PDB next to it)")
@@ -1176,6 +1239,9 @@ def main():
     parser.add_argument("--idc", default=None, help="Output IDA Python script to apply symbols")
     parser.add_argument("--min-size", type=int, default=6,
                         help="Min function size in bytes (default: 6)")
+    parser.add_argument('--allow-suspect-input', action='store_true', help='Explicitly permit snapshots flagged for unreadable pages or repetitive code')
+    parser.add_argument('--no-cache', action='store_true', help='Do not read or write match caches')
+    parser.add_argument('--cache-dir', help='Override the match cache directory')
     args = parser.parse_args()
 
     # Find PDB
@@ -1201,6 +1267,13 @@ def main():
 
     _, old_sections = parse_pe_sections(old_data)
     _, new_sections = parse_pe_sections(new_data)
+
+    quality = inspect_snapshot(args.new_binary)
+    if quality['requires_review']:
+        print(f"Snapshot requires review: {len(quality['suspicious_runs'])} repetitive code regions; "
+              f"{quality.get('capture', {}).get('unreadable_pages', 0)} unreadable pages")
+        if not args.allow_suspect_input:
+            sys.exit('Inspect this capture with inspect_snapshot.py before matching. Use --allow-suspect-input only after reviewing the warning.')
 
     # Parse PDB (keep session open for parameter queries later)
     print("\nParsing PDB...")
@@ -1230,22 +1303,12 @@ def main():
     # Build search index for new binary
     idx = build_hash_index(new_data, new_sections)
 
-    # --- Cache helpers ---
-    cache_dir = os.path.join(os.path.dirname(os.path.abspath(args.old_binary)), ".quick_match_cache")
-    os.makedirs(cache_dir, exist_ok=True)
-    # Cache key based on both binary sizes
-    cache_key = f"{os.path.getsize(args.old_binary)}_{os.path.getsize(args.new_binary)}"
-
-    def save_cache(name, data):
-        with open(os.path.join(cache_dir, f"{cache_key}_{name}.pkl"), 'wb') as f:
-            pickle.dump(data, f)
-
-    def load_cache(name):
-        path = os.path.join(cache_dir, f"{cache_key}_{name}.pkl")
-        if os.path.isfile(path):
-            with open(path, 'rb') as f:
-                return pickle.load(f)
-        return None
+    # Legacy size-only keys are deliberately never read.
+    cache_dir = args.cache_dir or os.path.join(os.path.dirname(os.path.abspath(args.old_binary)), '.quick_match_cache')
+    cache_key = make_cache_key(old_data, new_data, pdb_path, args.min_size) if not args.no_cache else 'disabled'
+    cache = MatchCache(cache_dir, cache_key, enabled=not args.no_cache)
+    save_cache, load_cache = cache.save, cache.load
+    print(f'Cache: {cache_key} ({cache_dir})')
 
     # --- Pass 1: exact byte match (single-pass prefix scan) ---
     cached = load_cache("pass1")
@@ -1551,6 +1614,15 @@ def main():
                 gap_resolved += 1
 
         print(f"\r  [{len(remaining)}/{len(remaining)}] gap={gap_resolved}")
+
+    # Do not label ranges that include zero-filled unreadable capture pages,
+    # even when approximate gap matching accepted the visible prefix.
+    unreadable_pages = sorted(quality.get('capture', {}).get('unreadable_page_rvas', []))
+    if unreadable_pages:
+        before = len(matched)
+        matched = {key: value for key, value in matched.items()
+                   if range_is_readable(value[2], value[3], unreadable_pages)}
+        print(f"Excluded {before - len(matched)} matches crossing unreadable capture pages")
 
     # --- Summary ---
     total = len(matched)

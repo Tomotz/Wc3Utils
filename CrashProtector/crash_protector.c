@@ -11,7 +11,7 @@
  */
 
 #define WIN32_LEAN_AND_MEAN
-#define VERSION  "v1.3.1"
+#define VERSION  "v1.4.0"
 
 #include <stdio.h>
 #include <windows.h>
@@ -71,8 +71,8 @@ typedef struct {
     DWORD codeSize;
     DWORD nameOff;      /* offset into g_symStrings */
     WORD  paramCount;
-    WORD  paramStart;   /* index into g_txtParams[] */
-} TxtFunc;              /* 16 bytes */
+    DWORD paramStart;   /* index into g_txtParams[]; tables can exceed 65535 entries */
+} TxtFunc;
 
 static TxtFunc*  g_txtFuncs    = NULL;
 static DWORD     g_txtFuncCount = 0;
@@ -240,12 +240,16 @@ static void FlushLogSync(void) {
     InterlockedExchange(&g_flushing, 0);
 }
 
+static void FlushCodeCapture(void);
+
 static DWORD WINAPI LogWriterThread(LPVOID param) {
     (void)param;
     while (!g_logShutdown) {
         WaitForSingleObject(g_logEvent, 500); /* wake on signal or periodic flush */
         FlushLogSync();
+        FlushCodeCapture();
     }
+    FlushCodeCapture();
 
     return 0;
 }
@@ -503,9 +507,20 @@ static const TxtFunc* TxtFindFunc(DWORD rva) {
     }
     if (lo == 0) return NULL;
     const TxtFunc* f = &g_txtFuncs[lo - 1];
-    if (rva < f->rva + f->codeSize)
+    if (rva - f->rva < f->codeSize)
         return f;
     return NULL;
+}
+
+/* The text table contains RVAs for the main executable only. */
+static const TxtFunc* TxtFindFuncForAddress(DWORD64 addr) {
+    HMODULE exe = GetModuleHandleA(NULL);
+    if (!exe || addr < (DWORD64)exe) return NULL;
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)exe;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)((BYTE*)exe + dos->e_lfanew);
+    DWORD64 rva = addr - (DWORD64)exe;
+    if (rva >= nt->OptionalHeader.SizeOfImage) return NULL;
+    return TxtFindFunc((DWORD)rva);
 }
 
 /* Collect parameters for a txt-symbol function.
@@ -515,9 +530,10 @@ static void TxtCollectFrameParams(const TxtFunc* func, CONTEXT* ctx,
                                    HANDLE hProc, BOOL isTopFrame,
                                    char* outBuf, int outBufSize) {
     outBuf[0] = '\0';
-    if (func->paramCount == 0) return;
+    if (func->paramCount == 0 || func->paramStart >= g_txtParamCount) return;
     int pos = 0;
-    for (WORD i = 0; i < func->paramCount && i < 16; i++) {
+    for (WORD i = 0; i < func->paramCount && i < 16
+                     && i < g_txtParamCount - func->paramStart; i++) {
         const TxtParam* p = &g_txtParams[func->paramStart + i];
         const char* pname = g_symStrings + p->nameOff;
 
@@ -700,7 +716,7 @@ static void LoadSymbolsTxt(void) {
                             g_txtFuncs[fi].paramCount = (WORD)strtoul(t4 + 1, NULL, 10);
                         }
                     }
-                    g_txtFuncs[fi].paramStart = (WORD)pi;
+                    g_txtFuncs[fi].paramStart = pi;
                     fi++;
                 }
             } else if (p[0] == 'P' && strncmp(p, "PARAM\t", 6) == 0 && pi < paramCount) {
@@ -802,42 +818,45 @@ static void CollectFrameParams(HANDLE hProc, CONTEXT* ctx, STACKFRAME64* frame,
         }
     }
 
-    /* Fallback: txt symbols */
-    if (g_txtFuncs) {
-        HMODULE hExe = GetModuleHandleA(NULL);
-        if (hExe) {
-            DWORD rva = (DWORD)(frame->AddrPC.Offset - (DWORD64)hExe);
-            const TxtFunc* func = TxtFindFunc(rva);
-            if (func && func->paramCount > 0)
-                TxtCollectFrameParams(func, ctx, hProc, isTopFrame,
-                                      outBuf, outBufSize);
-        }
-    }
+    /* Fallback: txt symbols, only within the main executable. */
+    const TxtFunc* func = TxtFindFuncForAddress(frame->AddrPC.Offset);
+    if (func && func->paramCount > 0)
+        TxtCollectFrameParams(func, ctx, hProc, isTopFrame, outBuf, outBufSize);
+}
+
+/* DbgHelp can synthesize Ordinal42 with Flags == 0, so SYMFLAG_EXPORT
+   alone cannot distinguish these placeholders from real debug symbols. */
+static BOOL IsOrdinalSymbolName(const char* name) {
+    if (strncmp(name, "Ordinal", 7) != 0) return FALSE;
+    const char* digit = name + 7;
+    if (!*digit) return FALSE;
+    for (; *digit; ++digit)
+        if (*digit < '0' || *digit > '9') return FALSE;
+    return TRUE;
 }
 
 /* Inner resolve (caller must hold g_dbgHelpLock if using PDB path) */
 static const char* ResolveSymbolInner(HANDLE hProc, DWORD64 addr,
                                        char* symBuf, size_t symBufSize) {
-    /* Try PDB/dbghelp first */
+    const char* exportName = NULL;
     if (g_SymFromAddr) {
         PSYMBOL_INFO sym = (PSYMBOL_INFO)symBuf;
+        memset(sym, 0, sizeof(*sym));
         sym->SizeOfStruct = sizeof(SYMBOL_INFO);
-        sym->MaxNameLen   = (ULONG)(symBufSize - sizeof(SYMBOL_INFO));
+        sym->MaxNameLen = (ULONG)(symBufSize - sizeof(SYMBOL_INFO));
         DWORD64 disp = 0;
-        if (g_SymFromAddr(hProc, addr, &disp, sym))
-            return sym->Name;
-    }
-    /* Fallback: txt symbols */
-    if (g_txtFuncs) {
-        HMODULE hExe = GetModuleHandleA(NULL);
-        if (hExe) {
-            DWORD rva = (DWORD)(addr - (DWORD64)hExe);
-            const TxtFunc* func = TxtFindFunc(rva);
-            if (func)
-                return g_symStrings + func->nameOff;
+        if (g_SymFromAddr(hProc, addr, &disp, sym)) {
+            /* Real debug symbols outrank the ported text table; nearest
+               exports such as Ordinal42 do not identify the function. */
+            if (!(sym->Flags & SYMFLAG_EXPORT) && !IsOrdinalSymbolName(sym->Name))
+                return sym->Name;
+            if (!IsOrdinalSymbolName(sym->Name)) exportName = sym->Name;
         }
     }
-    return "???";
+    const TxtFunc* func = TxtFindFuncForAddress(addr);
+    if (func && !IsOrdinalSymbolName(g_symStrings + func->nameOff))
+        return g_symStrings + func->nameOff;
+    return exportName ? exportName : "???";
 }
 
 /* Locking wrapper for use outside the stack trace loop */
@@ -1024,7 +1043,10 @@ static LONG CurInterval = CRASH_DEDUP_REPORT_INTERVAL;
 /* Only reached for access violations that
    no SEH handler caught (i.e., real crashes, not intentional AVs).
    Installed from the watchdog thread after game init is complete. */
+static void CaptureCrashCode(DWORD64 fault);
+
 static LONG WINAPI UnhandledCrashHandler(PEXCEPTION_POINTERS ep) {
+    CaptureCrashCode(ep->ContextRecord->Rip);
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
         CONTEXT* ctx = ep->ContextRecord;
         LONG count = InterlockedIncrement(&g_crashesSaved);
@@ -1379,70 +1401,7 @@ static void LogMainThreadLocation(void) {
 /*  Memory Dumper — dump decrypted .text section to disk - this is just for signature copying, it's unrelated to the crash protection and is not needed for most users               */
 /* ------------------------------------------------------------------ */
 
-static void DumpDecryptedExe(void) {
-    HMODULE hExe = GetModuleHandleA(NULL);
-    if (!hExe) return;
-
-    /* Get the path to the original exe on disk */
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(hExe, exePath, MAX_PATH);
-
-    /* Read the entire original file */
-    HANDLE hSrc = CreateFileA(exePath, GENERIC_READ, FILE_SHARE_READ, NULL,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hSrc == INVALID_HANDLE_VALUE) {
-        LogWithTimeStamp("ERROR: Cannot open original exe: %s (err=%lu)", exePath, GetLastError());
-        return;
-    }
-    DWORD fileSize = GetFileSize(hSrc, NULL);
-    BYTE* fileBuf = (BYTE*)HeapAlloc(GetProcessHeap(), 0, fileSize);
-    if (!fileBuf) { CloseHandle(hSrc); return; }
-    DWORD bytesRead;
-    ReadFile(hSrc, fileBuf, fileSize, &bytesRead, NULL);
-    CloseHandle(hSrc);
-
-    /* Parse the file's PE headers */
-    IMAGE_DOS_HEADER* fDos = (IMAGE_DOS_HEADER*)fileBuf;
-    IMAGE_NT_HEADERS* fNt  = (IMAGE_NT_HEADERS*)(fileBuf + fDos->e_lfanew);
-    IMAGE_SECTION_HEADER* fSec = IMAGE_FIRST_SECTION(fNt);
-    WORD numSec = fNt->FileHeader.NumberOfSections;
-
-    /* Only overwrite .text with decrypted in-memory content.
-       Other sections (rdata, data, etc.) stay from the original file — they
-       weren't encrypted, and in memory they've been relocated by ASLR
-       which would break PDB address matching. */
-    for (WORD i = 0; i < numSec; i++) {
-        if (memcmp(fSec[i].Name, ".text", 5) != 0) continue;
-        if (fSec[i].SizeOfRawData == 0) continue;
-
-        BYTE* memData = (BYTE*)hExe + fSec[i].VirtualAddress;
-        DWORD copySize = fSec[i].SizeOfRawData;
-        if (fSec[i].Misc.VirtualSize < copySize)
-            copySize = fSec[i].Misc.VirtualSize;
-
-        memcpy(fileBuf + fSec[i].PointerToRawData, memData, copySize);
-
-        LogLine("  Patched %.8s: FileOff=0x%X Size=0x%X",
-                 fSec[i].Name, fSec[i].PointerToRawData, copySize);
-    }
-
-    /* Write the patched exe */
-    char dumpPath[MAX_PATH];
-    sprintf_s(dumpPath, MAX_PATH, "%s\\wc3_decrypted.exe", g_logDir);
-
-    HANDLE hDst = CreateFileA(dumpPath, GENERIC_WRITE, 0, NULL,
-                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hDst != INVALID_HANDLE_VALUE) {
-        DWORD written;
-        WriteFile(hDst, fileBuf, fileSize, &written, NULL);
-        CloseHandle(hDst);
-        LogLine("Dumped decrypted exe: %s (%lu bytes)", dumpPath, written);
-    } else {
-        LogLine("ERROR: Failed to create dump file (err=%lu)", GetLastError());
-    }
-
-    HeapFree(GetProcessHeap(), 0, fileBuf);
-}
+#include "code_capture.h"
 
 static DWORD WINAPI WatchdogThread(LPVOID param) {
     (void)param;
@@ -1461,10 +1420,9 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
 
     /* Install UEF now that game init is complete.
        This captures the game's filter for chaining on non-AV exceptions. */
+    // InitCodeCapture();
     g_prevFilter = SetUnhandledExceptionFilter(UnhandledCrashHandler);
 
-    // /* For signature copying - dump the unprotected game exe to file so the data is not encrypted */
-    // DumpDecryptedExe();
 
     BOOL hangDumped = FALSE;
     DWORD lastDumpTime = 0;
@@ -1481,6 +1439,8 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     while (!g_watchdogShutdown) {
         Sleep(WATCHDOG_INTERVAL_MS);
         if (g_watchdogShutdown) break;
+
+        ServiceCodeCaptureRequest();
 
         /* Show any balloon queued by the crash handler */
         if (InterlockedCompareExchange(&g_pendingBalloon, 0, 1) == 1)

@@ -1,181 +1,148 @@
 # WC3 CrashProtector
 
-A DLL proxy that prevents Warcraft III Reforged from crashing due to invalid pointer access violations, and detects hangs.
+CrashProtector is a Windows x64 `version.dll` proxy that attempts to recover from unhandled Warcraft III crashes and records diagnostics for crashes and hangs. It does not repair network disconnects or desyncs.
 
-## What It Does
-
-There are a few main reasons that players drop undesirably from games:
- - Network disconnects - there was no connectivity between host and client and game drops the player. This used to be mitigate in classic by the 45 seconds grace period before a player is kicked, but no longer. I think these looks like the player just exits to scoreboard window.
- - Desync - there is a difference between players in how they see the game state (some unit exist for one player and not the other). Game notices and desyncs one of the players to avoid inconsistency. If a desync happened, you will see a desync log under \Documents\Warcraft III\Errors
- - Crashes - error in the application caused the game to crash and close. When these happen you will see a Crash log under \Documents\Warcraft III\Errors that will also state the reason for the crash.
- - Freezes - A very heavy compute is causing the application to hang. Can be an infinite loop, or just a very very long one that is intensive enough to make the process. When this happens the game window will freeze, and windows will offer to restart it.
-
- In this project we try to avoid crashes and make crashes and freezes more informative (allowing you to classify them, and possibly even understand what caused them).
-
-**Crash protection** — intercepts unhandled exceptions and safely recovers:
-- **Access violations** (most common crash type):
-  - For reads: returning 0 to the destination register
-  - For writes: discarding the write operation (nop)
-  - For execute (DEP): simulating a return to the caller
-  - Advancing past the faulting instruction to continue execution
-- **Other exceptions** (division by zero, illegal instruction, etc.):
-  - Decodes and skips the faulting instruction
-  - Falls back to simulating a return if the instruction can't be decoded
-
-**Hang detection** — a watchdog thread monitors the game's main thread and logs diagnostics (all thread stacks) when it stops responding.
-
-**Logging** — all crashes and hangs are logged to `Documents\CrashProtector\crash_protector.log` with register dumps, and module info. If symbols are available, will also generate stack traces and function args. Notification balloons appear on the 1st and 20th saved crash, and when a hang is detected to let the user know.
-
-Only truly unhandled exceptions are caught — the game's own exception handlers (`__try/__except`) run first and are not interfered with. If recovery is not possible (e.g. can't decode the instruction and no valid return address on the stack), the exception is passed through to the default handler.
-
-Note: this is a very hacky mitigation for crashes. Skipping faulting instructions leaves the program in a potentially inconsistent state, and might lead to later errors, but it is tested and prevents real crashes in practice. It is not expected to cause any issue when no crashes were encountered.
-
-## How It Works
-
-CrashProtector uses **DLL proxying** combined with an **Unhandled Exception Filter (UEF)**:
-
-1. On normal game startup, `version.dll` (a standard Windows DLL) is loaded.
-2. We replace it with a custom `version.dll` that is saved in the game executable folder, and is loaded instead of it.
-3. All normal version.dll function calls are forwarded to the real system DLL (loaded from `System32` at runtime).
-4. A watchdog thread waits for the game to finish initializing (window created). This watchdog checks for hangs in the main thread periodically.
-5. After init, a UEF is installed via `SetUnhandledExceptionFilter` — this only fires for exceptions that no SEH handler (try/catch block) caught
-6. When a real crash occurs, the UEF recovers and lets the game continue
-
-### Windows Exception Handling — How Exceptions Are Dispatched
-
-Understanding why we use a UEF requires knowing the Windows exception dispatch order:
-
-1. **Debugger** (first-chance notification)
-2. **VEH** (Vectored Exception Handlers) — global, not frame-based. Run before SEH regardless of call stack position. Registered via `AddVectoredExceptionHandler`.
-3. **SEH** (Structured Exception Handling) — frame-based `__try/__except` handlers. The system walks the stack searching for a handler. On x64, SEH is table-based: each function's `RUNTIME_FUNCTION` entry points to `UNWIND_INFO` which may have `UNW_FLAG_EHANDLER` indicating an exception handler.
-4. **UEF** (Unhandled Exception Filter) — registered via `SetUnhandledExceptionFilter`. Only reached if no SEH handler caught the exception. The filter can return `EXCEPTION_CONTINUE_EXECUTION` to resume with a modified context.
-5. **Debugger** (second-chance notification)
-6. **Process termination** (`ExitProcess`)
-
-Additionally, **VCH** (Vectored Continue Handlers, via `AddVectoredContinueHandler`) fire after any handler returns `EXCEPTION_CONTINUE_EXECUTION` — useful for observing which exceptions were handled, but not for catching unhandled ones.
-
-### Additional Features
-
-- **Hang detection**: A watchdog thread monitors the main thread's message loop via `SendMessageTimeout`. If the main thread stops responding, all thread stacks are dumped to the log.
-- **Symbol support**: If a `symbols.txt` file (generated by PdbPorter's quick_match.py) is placed next to the game executable, stack traces include function names and parameter values. A PDB also works via DbgHelp (adds source file/line numbers too). The symbols.txt file includes a TimeDateStamp header that is validated against the running exe, so stale files from a different build are automatically rejected.
-- **Archive logs**: On the first crash or hang, an archive log with a timestamped filename is created alongside the main log.
-
-### Technical Details
-
-- **Platform**: Windows x64 only
-- **Injection method**: DLL proxying via version.dll
-- **Exception handling**: Unhandled Exception Filter (installed after game init)
-- **Instruction decoding**: HDE64 (Hacker Disassembler Engine) to decode and skip faulting instructions
-- **Logging**: Lock-free async ring buffer with background writer thread
-- **Stack traces**: Via DbgHelp (StackWalk64, SymFromAddr, SymGetLineFromAddr64) with symbols.txt fallback
+The current compatibility target is **Warcraft III Reforged 3.0.0.24268**. The distributed DLL is self-signed; local testing and subsequent gameplay confirmed that this game build accepted it. Other computers and future game updates remain unverified. See [signing and sharing](LOCAL-SIGNING.md) for certificate details and release packaging.
 
 ## Installation
 
-### Option 1: Use Pre-built DLL
+1. Close Warcraft III.
+2. Back up any existing `version.dll` and `symbols.txt` beside `Warcraft III.exe`.
+3. Extract the release ZIP and copy **both** `version.dll` and `symbols.txt` into `Warcraft III\_retail_\x86_64`.
+4. Launch WC3 normally through Battle.net.
+5. Check `Documents\CrashProtector\crash_protector.log` for initialization and symbol-loading messages.
 
-1. Copy the pre-built `version.dll` to your WC3 Reforged x86_64 folder
-   - Default location: `C:\Program Files (x86)\Warcraft III\_retail_\x86_64\version.dll`
-   - Can probably work for WC3 classic as well and maybe even for other games — Should always be next to the game executable file (not shortcut)
-2. Launch WC3 normally through Battle.net (If game is already open you must restart it)
-3. Crashes will be logged to `Documents\CrashProtector\crash_protector.log`
+Use the signed top-level `version.dll` or the DLL from the release ZIP. `build/version.dll` is the unsigned compiler output. Keep the original Blizzard `war3_loader.dll`; no loader replacement or executable patch is part of this installation. Do not replace the Windows copy of `version.dll` in System32.
 
-### Option 2: Build and Install
+No separate certificate installation was needed for the self-signed DLL in local testing. Classic WC3, other games, and other Reforged builds are not validated targets.
 
-1. Open PowerShell
-2. Navigate to WC3Utils folder
-3. Run the build script with your WC3 path (might not be C:\):
-   ```
-   cd CrashProtector
-   .\build.bat "D:\Program Files (x86)\Warcraft III\_retail_\x86_64"
-   ```
+## What it does
 
-This will compile the DLL and copy `version.dll` to your WC3 folder.
+- **Crash recovery:** installs an Unhandled Exception Filter after the game window appears. It attempts to skip faulting reads/writes, clear a destination register for reads, or simulate a return for invalid execution targets. For other exceptions it attempts instruction skipping or a return. If it cannot recover, it delegates to the previous filter or continues exception handling.
+- **Hang detection:** a watchdog checks the main thread's message loop. After a startup grace period, a hang triggers thread-stack diagnostics and periodic main-thread samples. This reports hangs; it does not repair them.
+- **Logging:** records exception addresses, module offsets, registers, stack traces, and available parameter values. Notifications appear on the first and twentieth reported crash, and when a hang is detected.
+- **Version API forwarding:** forwards version-information calls to the real Windows system DLL.
 
-## Usage
+The filter is intended for exceptions that reach top-level handling, after the game's frame-based exception handlers have had a chance to handle them. Debugger behavior can differ from normal startup.
 
-Launch WC3 normally through Battle.net. The crash protector runs automatically.
+Recovery is a mitigation: skipping an instruction can leave game state inconsistent and cause later errors or desyncs. It cannot guarantee recovery from every fault or preservation of game state.
 
-When crashes are caught:
-- A notification balloon appears on the 1st and 20th crash
-- All crashes are logged with timestamps, faulting module + offset, register dump, and stack traces+arguments (when symbols are available)
-- The game continues running
+## Logs and symbols
 
-## Uninstallation
+Files are written to the Windows Documents folder, which may be redirected to another drive:
 
-Delete `version.dll` from your WC3 x86_64 folder. WC3 will revert to using the system version.dll.
+| File | Behavior |
+| --- | --- |
+| `CrashProtector/crash_protector.log` | Main log, overwritten on each launch. |
+| `CrashProtector/crash_YYYY-MM-DD_HH-MM-SS.log` | Session archive created after the first reported crash or detected hang. |
+| `CrashProtector/wc3_decrypted.exe` | Optional startup code snapshot (capture enabled only); not assumed to contain all gameplay code. Paired `.exe.json` records capture quality. |
 
-## Log File
+**Code capture is disabled in the current source and release DLL:** `InitCodeCapture();` is commented out in `crash_protector.c`. This disables startup, crash, and manual snapshots and their capture-buffer allocation; crash recovery, logs, and symbol resolution remain enabled. For diagnostic builds, uncomment the call and rebuild/sign, then disable it again before distributing.
 
-Logs are written to `Documents\CrashProtector\crash_protector.log` (overwritten each launch). When multiple crashes or a hang are detected, an archive log with a timestamp is also created.
+When enabled, snapshots copy the on-disk executable and replace its `.text` section with the readable in-memory contents. The first unhandled crash also freezes a snapshot before recovery changes the exception context, writing `wc3_capture_<PID>_crash_<sequence>_<tick>.exe` and a matching `.exe.json` in the background. Unreadable pages are zero-filled and explicitly counted; they must not be treated as recovered code. The capture buffer is allocated during startup and retained for the process lifetime (about 50 MiB for build 24268). These files are used for symbol porting, not as replacement game executables. Captures are sequential reads, not an atomic freeze of all game threads. To request another snapshot after gameplay starts, run `pwsh -NoProfile -File .\request-capture.ps1` from `CrashProtector`; allow about 15 seconds and wait for the completion line in the log. The capture test deliberately changes in-memory bytes to verify that crash-time data stays frozen before the background write.
 
+Place `symbols.txt` beside the game executable. The current table targets build **3.0.0.24268**, has PE timestamp **6AA4DE70**, and contains **54,250 functions** and **125,213 parameter records**. It is a partial port generated by PdbPorter's `quick_match.py`, so coverage and matches are not equivalent to complete Blizzard debug symbols. The loader rejects a timestamp mismatch when the file contains its timestamp header; retain that header.
+
+Symbol selection works as follows:
+
+1. Real named debug symbols from DbgHelp take precedence.
+2. A matching text-table function takes precedence over export-only or synthetic ordinal names.
+3. A named export can be used as a fallback.
+4. Synthetic names such as `Ordinal42` and `Ordinal1` are suppressed; unresolved names display as `???`. Addresses and module offsets remain available.
+
+An argument value of `?` means its value could not be recovered, even if the function name is known. Optimized code and registers belonging to older stack frames often prevent reliable argument recovery. A usable PDB may also provide file/line information; generated PDBs should be validated with the intended consumer.
+
+Symbol fixes use a 32-bit parameter-table index and restrict text lookup to addresses inside the main executable, preventing overflow and accidental matches for other DLLs.
+
+## Build and install from source
+
+Requirements: Windows x64, MSVC C++ Build Tools, PowerShell 7 (`pwsh`), and Windows SDK SignTool. The scripts currently contain local tool paths: adjust `vcvars64.bat` in `build.bat` and `tests/run.ps1`, and the default SignTool path in `sign-local.ps1`, for another development machine.
+
+`build.bat` finds PowerShell through `CRASHPROTECTOR_PWSH`, then PATH, the standard `Program Files\PowerShell\7` installation, or the local Codex runtime. To use another location, set `$env:CRASHPROTECTOR_PWSH = 'C:\path\to\pwsh.exe'` before running the build. Direct `pwsh` commands below require it on PATH or its full executable path.
+
+From `CrashProtector`:
+
+```powershell
+# Compile and sign; does not install or refresh the release ZIP.
+.\build.bat
+
+# Compile, sign, and install the DLL while WC3 is closed.
+.\build.bat "D:\Program Files (x86)\Warcraft III\_retail_\x86_64"
+
+# The build script installs only the DLL. Copy matching symbols separately.
+Copy-Item -LiteralPath .\symbols.txt -Destination "D:\Program Files (x86)\Warcraft III\_retail_\x86_64\symbols.txt"
 ```
-[14:23:45.123] === CrashProtector loaded (PID 12345, symbols=YES) ===
-[14:23:45.126] Ready - monitoring for invalid pointer access violations
-[14:23:45.126] Watchdog thread started
-[14:23:47.200] Watchdog: found game window (HWND=0x1234, tid=5678)
-[14:23:47.200] Crash recovery filter installed
-[14:24:12.456] ACCESS_VIOLATION #1: WRITE addr=0x00000023FFFFFFF3 RIP=0x00007FF780C8C1E1
-[14:24:12.456]   Module: Warcraft III.exe +0x4DC1E1 (???) instrLen=3
-[14:24:12.456]   RAX=... RBX=... RCX=... ...
-[14:24:12.456]   --- Stack Trace (Newest first) ---
-[14:24:12.456]   #0x0  0x00007FF780C8C1E1 in SomeFunction (param1=0x0, param2=0x1)
-[14:24:12.456]   #0x1  0x00007FF780C80000 in CallerFunction () at game.cpp:1234
-```
 
-## Building from Source
+Compilation writes unsigned output and intermediate files to ignored `build/`. Signing writes the signed `version.dll`, public `local-signing.cer`, and `signature.json` in this directory. Every rebuild must be signed before distribution. Signing verifies a separate file before replacing the release DLL; if replacement is blocked, the error reports the retained signed file. Installation removes the previous game-folder DLL, copies the signed build, and verifies an exact byte match. Failures include manual-copy instructions.
 
-### File Structure
-- `crash_protector.c` — Main crash handler, watchdog, and version.dll proxy
-- `hde64.c` / `hde64.h` — Instruction length decoder for x64
-- `version.def` — Export definitions for version.dll proxy functions
-- `build.bat` — Automated build and installation script
-
-### Manual Build
+For a manual build, run these commands from `CrashProtector` in an x64 MSVC developer command prompt:
 
 ```batch
-call "C:\Program Files (x86)\Microsoft Visual Studio\XX\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-cl /O2 /W3 /LD /Fe:version.dll crash_protector.c hde64.c /link /DEF:version.def /MACHINE:X64 user32.lib
+if not exist build mkdir build
+cd build
+cl /O2 /W3 /LD /Fe:version.dll ..\crash_protector.c ..\hde64.c /link /DEF:..\version.def /MACHINE:X64 user32.lib
+cd ..
+pwsh -NoProfile -File .\sign-local.ps1
 ```
 
-This produces `version.dll` which you can manually copy to your WC3 folder.
+Proceed to signing only if compilation succeeded, and install only after signing succeeded. Use the resulting top-level `version.dll` with the matching `symbols.txt`.
 
-## Notes
+## Tests
 
-- Only works with 64-bit Windows executables
-- Performance impact is minimal — the filter only activates on unhandled exceptions
-- The game's own exception handlers (SEH) are never interfered with
+From `CrashProtector`:
 
+```powershell
+pwsh -NoProfile -File .\tests\run.ps1
+```
 
-## Full process when new wc3 patch released:
+The compiled regression checks symbol precedence, unflagged ordinal placeholders, suppression of unresolved ordinals, preservation of named exports, a parameter index above 65,535, and address isolation between modules. It uses temporary fixtures and does not launch or deliberately crash WC3.
 
-1. Dump the decrypted exe:
-   - In crash_protector.c uncomment `DumpDecryptedExe()`
-   - Build and install - From power shell run:
-     ```
-     cd D:\Tom\scripts\wc3\Wc3Utils\CrashProtector
-     .\build.bat "D:\Program Files (x86)\Warcraft III\_retail_\x86_64"
-     ```
-   - This should create D:\Users\Tom\Documents\CrashProtector\wc3_decrypted.
-   - Run WC3 — this creates `Documents\CrashProtector\wc3_decrypted.exe`
-   - Re-comment `DumpDecryptedExe()` and rebuild
+## Updating symbols after a WC3 patch
 
-2. Generate symbols:
-  - From power shell run
-   ```
-   cd D:\Tom\scripts\wc3\Wc3Utils\PdbPorter
-   cp D:\Users\Tom\Documents\CrashProtector\wc3_decrypted.exe ".\Warcraft III.exe"
-   del .quick_match_cache
-   python quick_match.py "Warcraft III_symboled.exe" "Warcraft III.exe" -o symbols.txt --pdb "Warcraft III.pdb"
-   ```
-   - `symbols.txt` — loaded by CrashProtector for stack traces with function names + params
-   - `Warcraft III.pdb` — can be loaded in IDA for static analysis (has LLVM publics stream bug so SymFromAddr doesn't work, but IDA's DIA loader should be fine)
+1. Confirm that the signed DLL still starts with the new game build. Signing acceptance can change independently of symbol compatibility.
+2. Enable `InitCodeCapture();` in `crash_protector.c`, rebuild/sign, and install that diagnostic DLL. Launch WC3 and wait for `Code capture armed:` and the startup `Code capture:` completion line. Reproduce the relevant gameplay, then use a first-crash snapshot or request a manual capture. Copy the chosen `.exe` and its matching `.exe.json` into PdbPorter, preserving the startup snapshot for comparison. Do not assume the startup dump is complete.
+3. Keep the reference executable and its matching PDB together. For `Warcraft III_symboled.exe`, the script expects `Warcraft III_symboled.pdb` beside it.
+4. Inspect the chosen snapshot with `python inspect_snapshot.py "Warcraft III.exe" --compare "startup.exe"`. Exit code 2 flags unreadable pages or substantial suspicious repeated code. Verify the relevant function bytes before matching; a clean check is not proof of completeness. Cache keys now hash both executables, the reference PDB, matcher source, format version, and minimum-size option. Old size-only caches are ignored; `--no-cache` disables cache reads and writes.
+5. From `PdbPorter`, generate the text table:
 
-3. Deploy:
-   ```
-   copy symbols.txt "D:\Program Files (x86)\Warcraft III\_retail_\x86_64\"
-   ```
+```powershell
+python quick_match.py "Warcraft III_symboled.exe" "Warcraft III.exe" -o symbols.txt
+```
+
+The matcher refuses snapshots flagged by the quality check unless `--allow-suspect-input` is explicitly supplied after review. Do not use that override just to force a successful run.
+
+Optionally add `--pdb "Warcraft III.pdb"` for analysis output; this requires `llvm-pdbutil`. Add `--pdb-params` if parameter records are also needed in that generated PDB. The text output already includes available parameters.
+
+6. Check the output timestamp and matching results, then copy the new `symbols.txt` to both `CrashProtector/symbols.txt` and the game's `x86_64` folder while WC3 is closed. Confirm successful loading in the next log.
+7. Disable `InitCodeCapture();` again and rebuild/sign the distribution DLL. Refresh the release ZIP, installation README, target-build details, and checksums before sharing. Keep game executables, memory dumps, logs, and local rollback files out of the release.
+
+## Uninstall or roll back
+
+Close WC3 and restore the files backed up before installation. If CrashProtector added `version.dll` and `symbols.txt` where neither existed before, remove those added files. Existing logs and executable snapshots in Documents can be removed separately when no longer needed.
+
+Local development rollback scripts and backups are described in [LOCAL-SIGNING.md](LOCAL-SIGNING.md); they are not part of the distributed ZIP.
+
+## Source files
+
+- `crash_protector.c`: crash recovery, watchdog, logging, symbol resolver, and version API proxy.
+- `code_capture.h`, `request-capture.ps1`: first-crash/startup/manual snapshots and capture requests.
+- `hde64.c`, `hde64.h`: x64 instruction decoder.
+- `version.def`: proxy exports.
+- `build.bat`, `sign-local.ps1`: compilation, signing, and optional DLL installation.
+- `symbols.txt`: game-build-specific function and parameter table.
+- `tests/`: compiled symbol resolver regression and runner.
 
 ## Changelog
+
+### v1.4.0
+
+- Capture code at the first unhandled crash before recovery, support manual snapshots, and record unreadable/changed pages for symbol-input validation.
+
+- Added automatic self-signing, accepted locally by Reforged 3.0.0.24268.
+- Prefer matched text symbols over exports and synthetic ordinal placeholders, including ordinals returned with no export flag.
+- Display `???` for unresolved ordinal placeholders while retaining addresses and named exports.
+- Fix parameter-table index overflow and prevent text-symbol matches for addresses outside the main executable.
+- Refresh the symbols for build 24268, add regression coverage, and remove obsolete diagnostics and build artifacts while retaining local rollback backups.
 
 ### v1.3.1
 - Remove wrong register argument values from stacktrace - only leave values at top of the stack, and stack relative arguments.

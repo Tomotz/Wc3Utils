@@ -9,3 +9,8 @@ PdbPorter/ghidra_project/*
 PdbPorter/.quick_match_cache/*
 *.yaml
 *.pyc
+CrashProtector/build/
+CrashProtector/releases/
+CrashProtector/local-state/
+CrashProtector/local-signing.cer
+PdbPorter/captures/

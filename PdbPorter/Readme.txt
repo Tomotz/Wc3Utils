@@ -30,7 +30,7 @@ CrashProtector loads symbols.txt at startup and validates the TimeDateStamp
 header against the running exe — a stale file from a different build is
 automatically rejected.
 
-Note that cache is saved in .quick_match_cache/, and needs to be removed if you want to restart
+Cache is saved in .quick_match_cache/ and keyed by SHA-256 of both executables, the reference PDB, matcher source, cache format, and --min-size. Same-size input changes invalidate it automatically. Legacy size-only entries are ignored. Use --no-cache to disable reads/writes, or --cache-dir to use an isolated directory.
 
 Output:
   - symbols.txt — human-readable symbol map with TimeDateStamp header
@@ -45,10 +45,7 @@ loads it via SYMOPT_LOAD_ANYTHING (bypasses GUID mismatch). The PDB GUID
 is set to match the new binary's debug directory, so other tools
 (dbghelp, WinDbg) also accept it.
 
-Typical results for a minor WC3 patch: ~56K functions matched out of ~170K
-matchable (33%), covering most named/interesting functions. The ~113K
-unmatched are mostly tiny thunks, compiler-generated stubs, and functions
-that changed structurally between versions.
+Coverage depends on the input snapshot and game build. The verified 3.0.0.24268 table contains 54,250 functions (125,213 parameter records), improved from 39,017 in the startup-only table, versus roughly 105K in archived 2.0.4 tables. The inspected 3.0 startup dump contains repeated replacement code at missing pathfinding routines; it must not be treated as a complete decrypted executable. The first-crash capture restored ComputePath, SearchOnMap, AddToOpenSet, and their pathfinding callers. The final table excludes 152 candidates crossing unreadable pages and retains 1,610 nonconflicting prior records only after full normalized-body comparison with the reference executable. See the runtime snapshot workflow below for future symbol updates.
 
 
 Installation
@@ -221,3 +218,18 @@ Known issues
 - The ~67% unmatched rate is expected: most unmatched functions either
   changed structurally between versions, are too small to uniquely match,
   or are compiler-generated functions that don't exist in both binaries.
+
+
+Runtime snapshot validation (current workflow)
+----------------------------------------------
+CrashProtector now captures startup code, freezes the first unhandled crash snapshot before recovery, and supports manual capture after gameplay begins. See ../CrashProtector/README.md. Keep each .exe together with its .exe.json metadata.
+
+Before matching:
+  python inspect_snapshot.py "gameplay.exe" --compare "startup.exe"
+
+Exit code 2 means review is required: the file has unreadable pages or substantial long repeated non-padding code blocks (at least 64 KiB and 1% of .text). --json prints full details. A clean report does not prove all code is present; compare the specific functions involved in the crash. Captures are sequential reads, not an atomic snapshot of all threads.
+
+quick_match.py performs this check before parsing the PDB or matching. It stops on flagged inputs unless --allow-suspect-input is explicitly supplied after review. This override does not recover missing bytes. Do not replace a working symbol table with guessed matches just to increase the count.
+
+Run cache and snapshot-check regressions:
+  python -m unittest discover -s tests -v
